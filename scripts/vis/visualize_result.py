@@ -648,7 +648,8 @@ def _show_dir(dir, args, device, origin=(0, 0)):
         device=device,
         scale=args.scale,
     )
-    object_model.initialize([asset_path])
+    object_code = os.path.basename(asset_path)
+    object_model.initialize([object_code])
 
     n_envs = min(args.max_grasps, len(joint_states))
     n_axis = np.sqrt(n_envs).astype(int).item()
@@ -1160,7 +1161,7 @@ if __name__ == "__main__":
     arg_parser.add_argument(
         "--vis_dir",
         type=str,
-        default="/home/zrene/git/graspqp/_vis",
+        default="./_vis",
         help="directory to save visualization",
     )
     arg_parser.add_argument("--headless", action="store_true", help="run in headless mode")

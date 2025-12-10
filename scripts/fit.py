@@ -97,6 +97,7 @@ parser.add_argument(
 parser.add_argument("--show_initialization", action="store_true")
 
 parser.add_argument("--object_code_file", default=None, type=str)
+parser.add_argument("--mesh_extension", default=".obj", type=str, help="Mesh file extension (.obj, .stl, etc.)")
 
 parser.add_argument("--wandb_name", default=None, type=str)
 parser.add_argument("--wandb_project", default="graspqp", type=str)
@@ -309,7 +310,7 @@ object_model = ObjectModel(
     num_samples=2500,
     device=device,
 )
-object_model.initialize(args.object_code_list)
+object_model.initialize(args.object_code_list, extension=args.mesh_extension)
 
 if args.initialization == "convex_hull":
     initialize_convex_hull(hand_model, object_model, args)

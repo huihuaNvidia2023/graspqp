@@ -4,7 +4,8 @@ import torch
 
 from ..solver.scipy_solver import ScipyLsqSolver
 from .dexgrasp import DexgraspSpanMetric
-from .span import EucledianFrictionConeSpanMetric, OverallFrictionConeSpanMetric
+from .span import (EucledianFrictionConeSpanMetric,
+                   OverallFrictionConeSpanMetric)
 from .tdg import TDGSpanMetric
 
 try:
