@@ -21,6 +21,7 @@ from graspqp.core.optimizer import AnnealingDexGraspNet, MalaStar
 from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 from graspqp.metrics import GraspSpanMetricFactory
 from graspqp.utils.plot_utils import get_plotly_fig, show_initialization
+from graspqp.utils.profiler import get_profiler
 from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 from graspqp.utils.wandb_wrapper import WandbMockup
 
@@ -86,6 +87,7 @@ parser.add_argument(
 )
 
 parser.add_argument("--debug", action="store_true")
+parser.add_argument("--profile", action="store_true", help="Enable detailed profiling of optimization steps")
 parser.add_argument("--selected_object", default=None, type=str)
 parser.add_argument("--dataset", default="debug", type=str)
 parser.add_argument(
@@ -130,6 +132,9 @@ parser.add_argument("--use_gendexgrasp", default=True, type=bool)
 parser.add_argument("--no_exp_term", action="store_true")  # Disable exploration term
 
 args = parser.parse_args()
+
+# Initialize profiler
+profiler = get_profiler(enabled=args.profile, cuda_sync=True)
 
 if args.data_root_path is None:
     args.data_root_path = os.path.join("/data/release", args.dataset)
@@ -464,103 +469,109 @@ for loss_name, loss_value in losses.items():
 energy.sum().backward()
 optimizer.zero_grad()
 
-# Profiling
-step_times = []
-loop_start_time = time.time()
-
 for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
-    step_start = time.time()
-    s = optimizer.try_step()
-    reset_mask = None
+    with profiler.section("step"):
+        with profiler.section("try_step"):
+            s = optimizer.try_step()
+        reset_mask = None
 
-    E_fc_batch = energy.view(-1, args.batch_size)
-    mean = E_fc_batch.mean(-1)
-    std = E_fc_batch.std(-1)
-    z_score = ((E_fc_batch - mean.unsqueeze(-1)) / std.unsqueeze(-1)).view(-1)
+        E_fc_batch = energy.view(-1, args.batch_size)
+        mean = E_fc_batch.mean(-1)
+        std = E_fc_batch.std(-1)
+        z_score = ((E_fc_batch - mean.unsqueeze(-1)) / std.unsqueeze(-1)).view(-1)
 
-    if args.reset_epochs is not None and step % args.reset_epochs == 0 and (step < args.n_iter - 2 * args.reset_epochs):
-        reset_mask = z_score > args.z_score_threshold
+        if (
+            args.reset_epochs is not None
+            and step % args.reset_epochs == 0
+            and (step < args.n_iter - 2 * args.reset_epochs)
+        ):
+            reset_mask = z_score > args.z_score_threshold
 
-        # log distribution to wandb
-        if reset_mask.sum() > 0:
-            wandb.log(
-                {"optimizer/reset": reset_mask.sum() / reset_mask.shape[0]},
-                step=step,
-                commit=False,
+            # log distribution to wandb
+            if reset_mask.sum() > 0:
+                wandb.log(
+                    {"optimizer/reset": reset_mask.sum() / reset_mask.shape[0]},
+                    step=step,
+                    commit=False,
+                )
+
+                print("Resetting", reset_mask.sum(), "envs")
+
+                initialize_convex_hull(hand_model, object_model, args, env_mask=reset_mask)
+                optimizer.reset_envs(reset_mask)
+
+        optimizer.zero_grad()
+
+        with profiler.section("energy"):
+            new_energies = calculate_energy(
+                hand_model,
+                object_model,
+                energy_fnc=energy_fnc,
+                energy_names=energy_names,
+                profiler=profiler,
+                **energy_kwargs,
             )
 
-            print("Resetting", reset_mask.sum(), "envs")
+            # Add prior energy if configured
+            if prior_pose is not None and weight_dict["E_prior"] > 0:
+                new_energies["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
 
-            initialize_convex_hull(hand_model, object_model, args, env_mask=reset_mask)
-            optimizer.reset_envs(reset_mask)
+            new_energy = 0
+            for loss_name, loss_value in new_energies.items():
+                if loss_name not in weight_dict:
+                    raise ValueError(f"Loss name {loss_name} not in weight_dict")
+                new_energy += weight_dict[loss_name] * loss_value
 
-    optimizer.zero_grad()
+        with profiler.section("backward"):
+            new_energy.sum().backward()
 
-    new_energies = calculate_energy(
-        hand_model,
-        object_model,
-        energy_fnc=energy_fnc,
-        energy_names=energy_names,
-        **energy_kwargs,
-    )
+        if args.show_initialization:
+            show_initialization(object_model, hand_model, args.batch_size)
 
-    # Add prior energy if configured
-    if prior_pose is not None and weight_dict["E_prior"] > 0:
-        new_energies["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
+        with profiler.section("accept_step"):
+            with torch.no_grad():
+                accept, t = optimizer.accept_step(
+                    energy,
+                    new_energy,
+                    reset_mask,
+                    z_score,
+                    args.z_score_threshold,
+                )
 
-    new_energy = 0
-    for loss_name, loss_value in new_energies.items():
-        if loss_name not in weight_dict:
-            raise ValueError(f"Loss name {loss_name} not in weight_dict")
-        new_energy += weight_dict[loss_name] * loss_value
+                energy[accept] = new_energy[accept]
+                for loss_name, loss_value in new_energies.items():
+                    if loss_name not in weight_dict:
+                        raise ValueError(f"Loss name {loss_name} not in weight_dict")
+                    losses[loss_name][accept] = loss_value[accept]
 
-    new_energy.sum().backward()
+        with profiler.section("logging"):
+            wandb.log({"optimizer/step": s}, step=step, commit=False)
 
-    if args.show_initialization:
-        show_initialization(object_model, hand_model, args.batch_size)
+            if args.log_entropy:
+                joints_entropy = hand_model.joint_entropy()
+                translation_entropy, rotation_entropy = hand_model.pose_entropy()
+                score = -energy + joints_entropy
+                data = {
+                    "entropy/joints_entropy": joints_entropy.mean(),
+                    "entropy/translation_entropy": translation_entropy.mean(),
+                    "entropy/rotation_entropy": rotation_entropy.mean(),
+                    "entropy/total": 0.5 * joints_entropy.mean()
+                    + 0.5 * (translation_entropy.mean() + rotation_entropy.mean()),
+                    "stats/score": score.mean(),
+                }
+                wandb.log(data, step=step, commit=False)
 
-    with torch.no_grad():
-        accept, t = optimizer.accept_step(
-            energy,
-            new_energy,
-            reset_mask,
-            z_score,
-            args.z_score_threshold,
-        )
-
-        energy[accept] = new_energy[accept]
-        for loss_name, loss_value in new_energies.items():
-            if loss_name not in weight_dict:
-                raise ValueError(f"Loss name {loss_name} not in weight_dict")
-            losses[loss_name][accept] = loss_value[accept]
-
-        wandb.log({"optimizer/step": s}, step=step, commit=False)
-
-        if args.log_entropy:
-            joints_entropy = hand_model.joint_entropy()
-            translation_entropy, rotation_entropy = hand_model.pose_entropy()
-            score = -energy + joints_entropy
-            data = {
-                "entropy/joints_entropy": joints_entropy.mean(),
-                "entropy/translation_entropy": translation_entropy.mean(),
-                "entropy/rotation_entropy": rotation_entropy.mean(),
-                "entropy/total": 0.5 * joints_entropy.mean()
-                + 0.5 * (translation_entropy.mean() + rotation_entropy.mean()),
-                "stats/score": score.mean(),
-            }
-            wandb.log(data, step=step, commit=False)
-
-        data = {}
-        for entry in losses:
-            data[f"energy/{entry}"] = losses[entry].mean()
-            data[f"energy_weight/{entry}"] = weight_dict[entry] * losses[entry].mean()
-        wandb.log(
-            {
-                "energy/mean": energy.mean().item(),
-                **data,
-            },
-            step=step,
-        )
+            data = {}
+            for entry in losses:
+                data[f"energy/{entry}"] = losses[entry].mean()
+                data[f"energy_weight/{entry}"] = weight_dict[entry] * losses[entry].mean()
+            wandb.log(
+                {
+                    "energy/mean": energy.mean().item(),
+                    **data,
+                },
+                step=step,
+            )
 
         if args.debug and step % 50 == 1:
             show_initialization(object_model, hand_model, args.batch_size, len(args.object_code_list))
@@ -569,40 +580,35 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
                 exit()
 
         if args.log_to_wandb and not args.no_plotly:
-
             # log best env
             if step % 100 == 1 or step == args.n_iter - 1:
-                for batch_idx in range(len(args.object_code_list)):
+                with profiler.section("visualization"):
+                    for batch_idx in range(len(args.object_code_list)):
+                        selected_e = energy[batch_idx * args.batch_size : (batch_idx + 1) * args.batch_size]
+                        n_plot = min(args.batch_size, 5)
+                        env_idxs = torch.topk(-selected_e, n_plot).indices
+                        # sort env idxs
+                        env_idxs = torch.arange(n_plot, device=device)
+                        for i, env_idx in enumerate(env_idxs):
+                            fig = get_plotly_fig(
+                                object_model,
+                                hand_model,
+                                env_idx + batch_idx * args.batch_size,
+                            )
+                            # asset
+                            asset_name = args.object_code_list[batch_idx]
+                            # Create a table
+                            wandb.log(
+                                {f"vis_{asset_name}/mesh_best_{i}": wandb.Plotly(fig)},
+                                step=step,
+                            )
 
-                    selected_e = energy[batch_idx * args.batch_size : (batch_idx + 1) * args.batch_size]
-                    n_plot = min(args.batch_size, 5)
-                    env_idxs = torch.topk(-selected_e, n_plot).indices
-                    # sort env idxs
-                    env_idxs = torch.arange(n_plot, device=device)
-                    for i, env_idx in enumerate(env_idxs):
-                        fig = get_plotly_fig(
-                            object_model,
-                            hand_model,
-                            env_idx + batch_idx * args.batch_size,
-                        )
-                        # asset
-                        asset_name = args.object_code_list[batch_idx]
-                        # Create a table
-                        wandb.log(
-                            {f"vis_{asset_name}/mesh_best_{i}": wandb.Plotly(fig)},
-                            step=step,
-                        )
+        if step % 500 == 0:
+            export_poses(hand_model, energy, object_model=object_model, suffix=f"_step_{step}")
 
-    if step % 500 == 0:
-        export_poses(hand_model, energy, object_model=object_model, suffix=f"_step_{step}")
-
-    step_times.append(time.time() - step_start)
+    profiler.step_done()
 
 # Profiling summary
-total_time = time.time() - loop_start_time
-step_times = np.array(step_times)
-print(f"\n=== Profiling Summary ===")
-print(f"Total time: {total_time:.2f}s | Steps: {len(step_times)} | Avg: {step_times.mean()*1000:.2f}ms | "
-      f"Std: {step_times.std()*1000:.2f}ms | Min: {step_times.min()*1000:.2f}ms | Max: {step_times.max()*1000:.2f}ms")
+profiler.summary()
 
 export_poses(hand_model, energy, object_model=object_model, suffix="")
