@@ -523,9 +523,10 @@ def _show_dir(dir, args, device, origin=(0, 0)):
 
     # print in green color
     print(f"\033[92mLoading {checkpoint_path}\033[0m")
-    # print(f"Loading Files from {checkpoint_path}")
     checkpoint_data = torch.load(checkpoint_path)
-    print("Loading data from", checkpoint_path)
+    n_grasps_in_file = len(checkpoint_data.get("values", []))
+    print(f"Loading data from {checkpoint_path}")
+    print(f"  Found {n_grasps_in_file} grasps in file")
     # put on cpu, detach grad
 
     hand_model = get_hand_model(
@@ -652,6 +653,7 @@ def _show_dir(dir, args, device, origin=(0, 0)):
 
     n_envs = min(args.max_grasps, len(joint_states))
     n_axis = np.sqrt(n_envs).astype(int).item()
+    print(f"  Visualizing {n_envs} of {n_grasps_in_file} grasps (--max_grasps={args.max_grasps})")
     all_data = []
 
     distance, contact_normal = object_model.cal_distance(hand_model.contact_points)

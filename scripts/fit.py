@@ -37,7 +37,7 @@ parser.add_argument(
 )
 
 parser.add_argument("--energy_name", default=None, type=str)
-parser.add_argument("--n_contact", default=12, type=int)
+parser.add_argument("--n_contact", default=8, type=int)
 parser.add_argument("--batch_size", default=32, type=int)
 parser.add_argument("--n_iter", default=7000, type=int)
 # hyper parameters (** Magic, don't touch! **)
@@ -321,7 +321,7 @@ hand_model = get_hand_model(args.hand_name, device, grasp_type=args.grasp_type)
 object_model = ObjectModel(
     data_root_path=args.data_root_path,
     batch_size_each=args.batch_size,
-    num_samples=2500,
+    num_samples=1000,
     device=device,
 )
 object_model.initialize(args.object_code_list, extension=args.mesh_extension)
@@ -440,7 +440,7 @@ energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "
 if prior_pose is not None:
     print(f"Prior energy weight: {args.w_prior}")
 if contact_sampler is not None:
-    print(f"Contact sampler configured: {args.contact_mode} mode")
+    print(f"Contact sampler configured: {contact_sampler.config.mode} mode")
 
 energy_kwargs = {}
 if args.use_gendexgrasp:
@@ -610,5 +610,13 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
 
 # Profiling summary
 profiler.summary()
+
+print(f"\n=== Generation Summary ===")
+print(f"Optimized {total_batch_size} grasp candidates ({args.batch_size} per object × {num_objects} object(s))")
+print(f"Hand: {args.hand_name} | Contacts: {args.n_contact} | Iterations: {args.n_iter}")
+best_energy = energy.min().item()
+worst_energy = energy.max().item()
+mean_energy = energy.mean().item()
+print(f"Energy: best={best_energy:.2f}, mean={mean_energy:.2f}, worst={worst_energy:.2f}")
 
 export_poses(hand_model, energy, object_model=object_model, suffix="")
