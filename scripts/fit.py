@@ -373,7 +373,11 @@ if args.prior_file is not None:
     if prior_config.priors:
         prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
         prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)
-        args.w_prior = prior_config.prior_weight
+        # Use command-line --w_prior if set (non-zero), otherwise use config file value
+        if args.w_prior == 0.0:
+            args.w_prior = prior_config.prior_weight
+        elif args.w_prior != prior_config.prior_weight:
+            print(f"  Note: --w_prior={args.w_prior} overrides config file value ({prior_config.prior_weight})")
         print(f"  Loaded {len(prior_config.priors)} prior(s), weight={args.w_prior}")
 
         # Override with per-batch contact configs if priors specify them

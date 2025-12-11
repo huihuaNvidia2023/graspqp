@@ -1,0 +1,12 @@
+contact: {mode: uniform}
+priors:
+- translation: [-0.0693, -0.0231, 0.0142]
+  quaternion: [-0.1599, 0.8038, 0.4762, 0.3187]
+  joints: {index_joint_0: -0.1173, index_joint_1: 0.4473, index_joint_2: 0.7167, index_joint_3: 0.6975,
+    middle_joint_0: 0.1546, middle_joint_1: 0.5125, middle_joint_2: 0.7815, middle_joint_3: 0.5022,
+    ring_joint_0: -0.1864, ring_joint_1: 0.1227, ring_joint_2: 0.4539, ring_joint_3: 0.3707,
+    thumb_joint_0: 1.2015, thumb_joint_1: 0.1891, thumb_joint_2: 0.683, thumb_joint_3: 0.0384}
+jitter_translation: 0.02
+jitter_rotation: 0.1
+jitter_joints: 0.1
+prior_weight: 10.0
