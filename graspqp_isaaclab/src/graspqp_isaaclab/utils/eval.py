@@ -66,7 +66,9 @@ class RunningStatistics:
 
     def _get_details_table(self):
         table = PrettyTable()
-        table.field_names = ["Env", "Asset ID", "Success Rate", "Successes", "Trials"] + list(self._infos.keys()) + ["Path"]
+        table.field_names = (
+            ["Env", "Asset ID", "Success Rate", "Successes", "Trials"] + list(self._infos.keys()) + ["Path"]
+        )
         table.float_format = "0.2"
         for env_id in range(self._n_envs):
             ratio = self.sucesses[env_id] / (self.trials[env_id] + 1e-3)

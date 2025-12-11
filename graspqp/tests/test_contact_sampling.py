@@ -12,8 +12,7 @@ from typing import Dict, List, Optional
 
 import torch
 
-from graspqp.core.contact_sampler import (ContactSamplingConfig,
-                                          HierarchicalContactSampler)
+from graspqp.core.contact_sampler import ContactSamplingConfig, HierarchicalContactSampler
 
 # ============================================================================
 # Test Fixtures (as helper methods)

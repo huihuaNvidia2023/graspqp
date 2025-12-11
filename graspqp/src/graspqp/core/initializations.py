@@ -111,7 +111,9 @@ def initialize_convex_hull(hand_model, object_model, args, env_mask=None, energy
             # 4. Construct the batched 3x3 orientation matrices
             # Stack the right, up, and forward vectors into 3x3 matrices
             orientation_matrices = torch.stack([forward, up, right], dim=-1)
-            basis = torch.stack([forward_vector, -torch.cross(forward_vector, base_up_vector, dim=-1), base_up_vector], dim=-1)
+            basis = torch.stack(
+                [forward_vector, -torch.cross(forward_vector, base_up_vector, dim=-1), base_up_vector], dim=-1
+            )
 
             return orientation_matrices @ basis
 

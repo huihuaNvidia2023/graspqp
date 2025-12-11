@@ -33,8 +33,7 @@ try:
 except Exception:
     go = None  # type: ignore
 
-from pygltflib import (GLTF2, Accessor, Asset, Buffer, BufferView, Material,
-                       Mesh, Node, Primitive, Scene)
+from pygltflib import GLTF2, Accessor, Asset, Buffer, BufferView, Material, Mesh, Node, Primitive, Scene
 
 try:
     # Newer naming in some releases

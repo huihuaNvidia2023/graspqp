@@ -21,8 +21,7 @@ import torch
 # Add project to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from graspqp.core.contact_sampler import (ContactSamplingConfig,
-                                          HierarchicalContactSampler)
+from graspqp.core.contact_sampler import ContactSamplingConfig, HierarchicalContactSampler
 from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 
 

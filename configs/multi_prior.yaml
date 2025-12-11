@@ -1,0 +1,30 @@
+# Multiple prior poses for diverse initialization
+# Useful when you want to explore different grasp approaches
+
+contact:
+  mode: constrained
+  links:
+    - index_link_3
+    - middle_link_3
+    - ring_link_3
+    - thumb_link_3
+  min_fingers: 2
+  max_contacts_per_link: 3
+
+priors:
+  # Top-down approach
+  - translation: [0.0, 0.0, 0.12]
+    rotation: [1, 0, 0, 0]
+
+  # Side approach (rotated 90 degrees around X)
+  - translation: [0.0, 0.1, 0.05]
+    rotation: [0.707, 0.707, 0, 0]
+
+  # Angled approach
+  - translation: [0.05, 0.05, 0.1]
+    rotation: [0.924, 0.383, 0, 0]  # 45 degree tilt
+
+jitter_translation: 0.015
+jitter_rotation: 0.08
+jitter_joints: 0.08
+prior_weight: 8.0

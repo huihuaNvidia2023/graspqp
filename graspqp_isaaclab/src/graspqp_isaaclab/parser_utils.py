@@ -128,7 +128,9 @@ def add_default_args(parser):
     parser.add_argument(
         "--grasp_type", default="default", help="Grasp category or type identifier for filtering specific grasp sets."
     )
-    parser.add_argument("--file_pattern", default=None, help="Regex pattern for matching specific prediction files by name.")
+    parser.add_argument(
+        "--file_pattern", default=None, help="Regex pattern for matching specific prediction files by name."
+    )
 
     return parser
 
@@ -280,7 +282,9 @@ def parse_args(parser):
                 # direct access
                 usd_file = os.path.join(asset_dir, f"{asset}.usd")
                 if not os.path.exists(usd_file):
-                    raise FileNotFoundError(f"No USD file found in '{asset_dir}' at 'coacd/{asset}.usd' nor '{asset}.usd'")
+                    raise FileNotFoundError(
+                        f"No USD file found in '{asset_dir}' at 'coacd/{asset}.usd' nor '{asset}.usd'"
+                    )
             args_cli.usd_files.append(usd_file)
     else:
         if isinstance(args_cli.usd_files, str):

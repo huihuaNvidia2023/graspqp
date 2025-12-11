@@ -83,13 +83,25 @@ if __name__ == "__main__":
         )
 
         x_axis = go.Scatter3d(
-            x=[idx * args.spacing, idx * args.spacing + 0.1], y=[0, 0], z=[0, 0], mode="lines", line=dict(color="red", width=5)
+            x=[idx * args.spacing, idx * args.spacing + 0.1],
+            y=[0, 0],
+            z=[0, 0],
+            mode="lines",
+            line=dict(color="red", width=5),
         )
         y_axis = go.Scatter3d(
-            x=[idx * args.spacing, idx * args.spacing], y=[0, 0.1], z=[0, 0], mode="lines", line=dict(color="green", width=5)
+            x=[idx * args.spacing, idx * args.spacing],
+            y=[0, 0.1],
+            z=[0, 0],
+            mode="lines",
+            line=dict(color="green", width=5),
         )
         z_axis = go.Scatter3d(
-            x=[idx * args.spacing, idx * args.spacing], y=[0, 0], z=[0, 0.1], mode="lines", line=dict(color="blue", width=5)
+            x=[idx * args.spacing, idx * args.spacing],
+            y=[0, 0],
+            z=[0, 0.1],
+            mode="lines",
+            line=dict(color="blue", width=5),
         )
 
         coordinate_system = [x_axis, y_axis, z_axis]
@@ -120,7 +132,9 @@ if __name__ == "__main__":
                 v = mesh.vertices + penetration_keypoint
                 f = mesh.faces
                 data += [
-                    go.Mesh3d(x=v[:, 0], y=v[:, 1], z=v[:, 2], i=f[:, 0], j=f[:, 1], k=f[:, 2], color="burlywood", opacity=0.5)
+                    go.Mesh3d(
+                        x=v[:, 0], y=v[:, 1], z=v[:, 2], i=f[:, 0], j=f[:, 1], k=f[:, 2], color="burlywood", opacity=0.5
+                    )
                 ]
 
         if args.show_jacobian:

@@ -29,7 +29,8 @@ for hand_type in HAND_TYPES:
 
             # Collect all .obj files in the folder
             obj_files = glob.glob(
-                os.path.join(folder_path, "*", hand_type, n_contacts, energy_method, grasp_type, "*.obj"), recursive=True
+                os.path.join(folder_path, "*", hand_type, n_contacts, energy_method, grasp_type, "*.obj"),
+                recursive=True,
             )
             obj_files.sort()  # Sort files for consistent placement order
 

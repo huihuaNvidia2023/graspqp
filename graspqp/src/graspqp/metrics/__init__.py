@@ -1,5 +1,4 @@
-from .ops.registry import (DexgraspSpanMetric, GraspSpanMetricFactory,
-                           SpanMetricWrapper, TDGSpanMetric)
+from .ops.registry import DexgraspSpanMetric, GraspSpanMetricFactory, SpanMetricWrapper, TDGSpanMetric
 
 GraspQPSpanMetric = SpanMetricWrapper
 

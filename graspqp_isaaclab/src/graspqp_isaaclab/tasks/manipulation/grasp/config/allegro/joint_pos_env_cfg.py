@@ -8,8 +8,7 @@
 ##
 from graspqp_isaaclab.assets.allegro import ALLEGRO_HAND_CFG
 from graspqp_isaaclab.tasks.manipulation.grasp import mdp
-from graspqp_isaaclab.tasks.manipulation.grasp.config.object_mining_env import \
-    ObjectGraspMiningEnvCfg
+from graspqp_isaaclab.tasks.manipulation.grasp.config.object_mining_env import ObjectGraspMiningEnvCfg
 from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.utils import configclass
 

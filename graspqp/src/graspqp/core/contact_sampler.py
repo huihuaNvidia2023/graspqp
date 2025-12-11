@@ -146,7 +146,8 @@ class HierarchicalContactSampler:
             self.allowed_links = [link for link in self.config.preferred_links if link in self.link_to_indices]
             if len(self.allowed_links) == 0:
                 raise ValueError(
-                    f"None of the preferred_links exist in hand model. " f"Available links: {list(self.link_to_indices.keys())}"
+                    f"None of the preferred_links exist in hand model. "
+                    f"Available links: {list(self.link_to_indices.keys())}"
                 )
         else:
             self.allowed_links = list(self.link_to_indices.keys())

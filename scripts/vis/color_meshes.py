@@ -23,7 +23,11 @@ os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
 
 def _draw_line_plotly(start, end, color="red", width=5):
     return go.Scatter3d(
-        x=[start[0], end[0]], y=[start[1], end[1]], z=[start[2], end[2]], mode="lines", line=dict(color=color, width=width)
+        x=[start[0], end[0]],
+        y=[start[1], end[1]],
+        z=[start[2], end[2]],
+        mode="lines",
+        line=dict(color=color, width=width),
     )
 
 
@@ -162,7 +166,11 @@ if __name__ == "__main__":
     arg_parser = argparse.ArgumentParser(description="Visualize hand model")
     arg_parser.add_argument("--device", type=str, default="cuda", help="device to run the model")
     arg_parser.add_argument(
-        "--hand_name", type=str, default="ability_hand", help="name of the hand model", choices=AVAILABLE_HANDS + ["all"]
+        "--hand_name",
+        type=str,
+        default="ability_hand",
+        help="name of the hand model",
+        choices=AVAILABLE_HANDS + ["all"],
     )
     arg_parser.add_argument("--show_jacobian", action="store_true", help="show jacobian")
     arg_parser.add_argument("--show_joint_axes", action="store_true", help="show joint axes")
@@ -184,7 +192,10 @@ if __name__ == "__main__":
     arg_parser.add_argument("--max_grasps", type=int, default=-1, help="maximum number of grasps to visualize")
     arg_parser.add_argument("--calc_energy", action="store_true", help="calculate energy")
     arg_parser.add_argument(
-        "--vis_dir", type=str, default="/home/zrene/git/DexGraspNet/graspqp/_vis", help="directory to save visualization"
+        "--vis_dir",
+        type=str,
+        default="/home/zrene/git/DexGraspNet/graspqp/_vis",
+        help="directory to save visualization",
     )
     arg_parser.add_argument("--headless", action="store_true", help="run in headless mode")
     arg_parser.add_argument("--overwrite", action="store_true", help="overwrite existing files")

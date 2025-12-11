@@ -3,8 +3,7 @@ import theseus as th
 import torch
 
 from graspqp.metrics.solver.costs import quad_error_torch
-from graspqp.metrics.solver.theseus_solvers import (
-    CholeskyRegularizedDenseSolver, PinvDenseSolver)
+from graspqp.metrics.solver.theseus_solvers import CholeskyRegularizedDenseSolver, PinvDenseSolver
 
 
 class LsqSolver:

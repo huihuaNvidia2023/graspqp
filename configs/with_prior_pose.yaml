@@ -1,0 +1,28 @@
+# Configuration with prior poses for guided initialization
+# Hand will be initialized near these poses and optimization will try to stay close
+
+contact:
+  mode: constrained
+  links:
+    - index_link_3
+    - middle_link_3
+    - thumb_link_3
+  min_fingers: 2
+  max_contacts_per_link: 4
+
+# Define one or more prior poses
+# Each batch item cycles through these with added jitter for diversity
+priors:
+  - translation: [0.0, 0.0, 0.1]  # 10cm above object center
+    rotation: [1, 0, 0, 0]        # Identity rotation (w,x,y,z quaternion)
+    # joints: {}                  # Optional: specific joint angles
+    # contact_links: []           # Optional: per-prior contact override
+    # contact_mode: uniform       # Optional: per-prior mode override
+
+# Jitter for batch diversity
+jitter_translation: 0.02  # 2cm std
+jitter_rotation: 0.1      # ~6 degrees std
+jitter_joints: 0.1
+
+# Weight for prior deviation energy
+prior_weight: 10.0

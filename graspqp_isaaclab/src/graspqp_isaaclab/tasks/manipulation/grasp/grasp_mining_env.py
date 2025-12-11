@@ -10,8 +10,7 @@ import isaaclab.sim as sim_utils
 import torch
 from graspqp_isaaclab.tasks.manipulation.grasp import mdp
 from isaaclab.assets import Articulation, ArticulationCfg, AssetBaseCfg
-from isaaclab.assets.rigid_object.rigid_object_cfg import (RigidObject,
-                                                           RigidObjectCfg)
+from isaaclab.assets.rigid_object.rigid_object_cfg import RigidObject, RigidObjectCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import ActionTermCfg as ActionTerm
 from isaaclab.managers import EventTermCfg as EventTerm

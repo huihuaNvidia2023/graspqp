@@ -1,6 +1,9 @@
 """
 Based on Dexgraspnet: https://pku-epic.github.io/DexGraspNet/
+Extended with hierarchical contact sampling support.
 """
+
+from typing import List, Optional
 
 import torch
 from torch.distributions import Normal
@@ -76,7 +79,9 @@ class AnnealingDexGraspNet:
             current step size
         """
 
-        s = self.step_size * self.temperature_decay ** torch.div(self.step, self.step_size_period, rounding_mode="floor")
+        s = self.step_size * self.temperature_decay ** torch.div(
+            self.step, self.step_size_period, rounding_mode="floor"
+        )
         step_size = torch.zeros(*self.hand_model.hand_pose.shape, dtype=torch.float, device=self.device) + s
 
         self.ema_grad_hand_pose = (
@@ -164,11 +169,30 @@ class MalaStar:
         global_ema=False,
         clip_grad=False,
         batch_size=-1,
+        contact_sampler=None,
+        contact_samplers: Optional[List] = None,
+        prior_pose: Optional[torch.Tensor] = None,
+        prior_weight: float = 0.0,
     ):
         """
         Implementation of MALA* optimizer introduced in GraspQP.
-        """
 
+        Extended with:
+        - Hierarchical contact sampling support
+        - Per-batch-item contact configurations
+        - Prior pose tracking for energy computation
+
+        Parameters
+        ----------
+        contact_sampler : HierarchicalContactSampler, optional
+            Single sampler for all batch items (uniform config)
+        contact_samplers : List[HierarchicalContactSampler], optional
+            Per-batch-item samplers for different contact configurations
+        prior_pose : torch.Tensor, optional
+            (B, 3+6+n_dofs) prior hand pose for energy computation
+        prior_weight : float
+            Weight for prior deviation energy term
+        """
         self.hand_model = hand_model
         self.batch_size = batch_size
         self.device = device
@@ -196,6 +220,14 @@ class MalaStar:
             self.hand_model.hand_pose.shape[0], self.hand_model.n_dofs + 9, dtype=torch.float, device=device
         )
 
+        # Contact sampling
+        self.contact_sampler = contact_sampler
+        self.contact_samplers = contact_samplers
+
+        # Prior tracking
+        self.prior_pose = prior_pose
+        self.prior_weight = prior_weight
+
     def try_step(self):
         """
         Try to update translation, rotation, joint angles, and contact point indices
@@ -206,7 +238,9 @@ class MalaStar:
             current step size
         """
 
-        s = self.step_size * self.temperature_decay ** torch.div(self.step, self.step_size_period, rounding_mode="floor")
+        s = self.step_size * self.temperature_decay ** torch.div(
+            self.step, self.step_size_period, rounding_mode="floor"
+        )
         step_size = torch.zeros(*self.hand_model.hand_pose.shape, dtype=torch.float, device=self.device) + s[..., None]
         if self.clip_grad:
             gradient = self.hand_model.hand_pose.grad.clip(min=-100, max=100)
@@ -250,11 +284,7 @@ class MalaStar:
             print(self.hand_model.hand_pose)
 
         batch_size, n_contact = self.hand_model.contact_point_indices.shape
-        switch_mask = torch.rand(batch_size, n_contact, dtype=torch.float, device=self.device) < self.switch_possibility
-        contact_point_indices = self.hand_model.contact_point_indices.clone()
-        contact_point_indices[switch_mask] = torch.randint(
-            self.hand_model.n_contact_candidates, size=[switch_mask.sum()], device=self.device
-        )
+        contact_point_indices = self._sample_contacts(batch_size, n_contact)
 
         self.old_hand_pose = self.hand_model.hand_pose
         self.old_contact_point_indices = self.hand_model.contact_point_indices
@@ -271,6 +301,67 @@ class MalaStar:
         self.step += 1
 
         return s
+
+    def _sample_contacts(self, batch_size: int, n_contact: int) -> torch.Tensor:
+        """
+        Sample new contact point indices using configured sampler.
+
+        Supports:
+        - Legacy uniform sampling (no sampler configured)
+        - Single sampler for all batch items
+        - Per-batch-item samplers for different configurations
+
+        Returns
+        -------
+        contact_point_indices : torch.Tensor
+            (batch_size, n_contact) new contact indices
+        """
+        # Determine which contacts to switch
+        switch_mask = torch.rand(batch_size, n_contact, dtype=torch.float, device=self.device) < self.switch_possibility
+        contact_point_indices = self.hand_model.contact_point_indices.clone()
+
+        if self.contact_sampler is not None:
+            # Single sampler for all batch items
+            # Sample full sets for items that need switching
+            batch_switch_mask = switch_mask.any(dim=1)
+            if batch_switch_mask.any():
+                n_switch = batch_switch_mask.sum().item()
+                new_samples = self.contact_sampler.sample(n_switch, n_contact)
+                # For switched items, replace only switched contacts
+                switch_indices = batch_switch_mask.nonzero(as_tuple=True)[0]
+                for i, idx in enumerate(switch_indices):
+                    item_switch = switch_mask[idx]
+                    contact_point_indices[idx, item_switch] = new_samples[i, item_switch]
+
+        elif self.contact_samplers is not None:
+            # Per-batch-item samplers
+            for b in range(batch_size):
+                if switch_mask[b].any():
+                    sampler = self.contact_samplers[b % len(self.contact_samplers)]
+                    new_sample = sampler.sample(1, n_contact)[0]
+                    contact_point_indices[b, switch_mask[b]] = new_sample[switch_mask[b]]
+        else:
+            # Legacy uniform sampling
+            contact_point_indices[switch_mask] = torch.randint(
+                self.hand_model.n_contact_candidates, size=[switch_mask.sum()], device=self.device
+            )
+
+        return contact_point_indices
+
+    def set_contact_sampler(self, sampler):
+        """Set a single contact sampler for all batch items."""
+        self.contact_sampler = sampler
+        self.contact_samplers = None
+
+    def set_contact_samplers(self, samplers: List):
+        """Set per-batch-item contact samplers."""
+        self.contact_samplers = samplers
+        self.contact_sampler = None
+
+    def set_prior_pose(self, prior_pose: torch.Tensor, prior_weight: float = 10.0):
+        """Set prior pose for energy computation."""
+        self.prior_pose = prior_pose
+        self.prior_weight = prior_weight
 
     def reset_envs(self, mask):
         self.step[mask] = 0

@@ -97,7 +97,9 @@ class HandModel(Articulation):
 
         for joint_name in self._data.joint_names:
             try:
-                self._data.urdf_to_isaac_sim_joint_mapping.append(self._data.hand_model.actuated_joints_names.index(joint_name))
+                self._data.urdf_to_isaac_sim_joint_mapping.append(
+                    self._data.hand_model.actuated_joints_names.index(joint_name)
+                )
             except ValueError:
                 pass
 
@@ -284,7 +286,9 @@ class HandModel(Articulation):
         # convert everything to tensors
         self._data.actuated_joint_indices = torch.tensor(self._data.actuated_joint_indices, device=self.device)
         self._data.mimic_joint_indices = torch.tensor(self._data.mimic_joint_indices, device=self.device)
-        self._data.mimic_joint_parents_indices = torch.tensor(self._data.mimic_joint_parents_indices, device=self.device)
+        self._data.mimic_joint_parents_indices = torch.tensor(
+            self._data.mimic_joint_parents_indices, device=self.device
+        )
 
     # def write_joint_position_to_sim(
     #     self,

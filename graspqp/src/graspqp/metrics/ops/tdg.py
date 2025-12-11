@@ -230,7 +230,13 @@ class TDGSpanMetric(torch.nn.Module):
         self.tdg_energy = TDGEnergy(**config)
 
     def forward(
-        self, contact_pts: torch.Tensor, contact_normals: torch.Tensor, cog, torque_weight=0.0, with_solution=False, **kwargs
+        self,
+        contact_pts: torch.Tensor,
+        contact_normals: torch.Tensor,
+        cog,
+        torque_weight=0.0,
+        with_solution=False,
+        **kwargs
     ):
         contact_pts = contact_pts - cog.unsqueeze(1)
         energy = 100 * self.tdg_energy.forward(contact_pts, contact_normals).squeeze(

@@ -9,8 +9,7 @@
 
 from graspqp_isaaclab.assets.shadow_hand import SHADOW_HAND_CFG
 from graspqp_isaaclab.tasks.manipulation.grasp import mdp
-from graspqp_isaaclab.tasks.manipulation.grasp.config.object_mining_env import \
-    ObjectGraspMiningEnvCfg
+from graspqp_isaaclab.tasks.manipulation.grasp.config.object_mining_env import ObjectGraspMiningEnvCfg
 from isaaclab.managers.scene_entity_cfg import SceneEntityCfg
 from isaaclab.utils import configclass
 

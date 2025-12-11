@@ -1,0 +1,21 @@
+# Constrained sampling: only use fingertip links
+# Good for precision grasps where you want contacts only on fingertips
+
+contact:
+  mode: constrained
+  links:
+    - index_link_3
+    - middle_link_3
+    - ring_link_3
+    - thumb_link_3
+  min_fingers: 2
+  max_contacts_per_link: 4
+
+# No priors - use default initialization
+priors: []
+
+# Jitter settings (used when expanding priors)
+jitter_translation: 0.02
+jitter_rotation: 0.1
+jitter_joints: 0.1
+prior_weight: 10.0

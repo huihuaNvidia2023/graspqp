@@ -1,0 +1,38 @@
+# Per-batch-item contact configurations via priors
+# Each prior can specify different contact links
+
+contact:
+  mode: uniform  # Default fallback
+  min_fingers: 2
+
+priors:
+  # Pinch grasp: index + thumb
+  - translation: [0.0, 0.0, 0.08]
+    rotation: [1, 0, 0, 0]
+    contact_links:
+      - index_link_3
+      - thumb_link_3
+    contact_mode: constrained
+
+  # Three-finger grasp
+  - translation: [0.0, 0.0, 0.1]
+    rotation: [1, 0, 0, 0]
+    contact_links:
+      - index_link_3
+      - middle_link_3
+      - thumb_link_3
+    contact_mode: constrained
+
+  # Power grasp: all fingers
+  - translation: [0.0, 0.0, 0.12]
+    rotation: [1, 0, 0, 0]
+    contact_links:
+      - index_link_3
+      - middle_link_3
+      - ring_link_3
+      - thumb_link_3
+    contact_mode: constrained
+
+jitter_translation: 0.02
+jitter_rotation: 0.1
+prior_weight: 10.0

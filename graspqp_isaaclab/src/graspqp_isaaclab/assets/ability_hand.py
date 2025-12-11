@@ -140,7 +140,9 @@ ABILITY_HAND_CFG = HandModelCfg(
             sleep_threshold=0.005,
             stabilization_threshold=0.0005,
         ),
-        collision_props=sim_utils.CollisionPropertiesCfg(contact_offset=0.005, rest_offset=0.0, torsional_patch_radius=0.002),
+        collision_props=sim_utils.CollisionPropertiesCfg(
+            contact_offset=0.005, rest_offset=0.0, torsional_patch_radius=0.002
+        ),
     ),
     init_state=ABILITY_HAND_DEFAULT,
     actuators={

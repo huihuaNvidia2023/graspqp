@@ -64,7 +64,9 @@ def spawn_multi_object_randomly_sdf(
         source_prim_paths = sim_utils.find_matching_prim_paths(root_path)
         # if no matching prims are found, raise an error
         if len(source_prim_paths) == 0:
-            raise RuntimeError(f"Unable to find source prim path: '{root_path}'. Please create the prim before spawning.")
+            raise RuntimeError(
+                f"Unable to find source prim path: '{root_path}'. Please create the prim before spawning."
+            )
     else:
         source_prim_paths = [root_path]
 

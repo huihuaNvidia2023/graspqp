@@ -48,7 +48,12 @@ def show_initialization(object_model, hand_model, batch_size, n_objects):
 def get_plotly_fig(object_model, hand_model, env_idx):
     object_plotly = object_model.get_plotly_data(env_idx, opacity=1.0, simplify=False)
     hand_plotly = hand_model.get_plotly_data(
-        env_idx, opacity=0.9, with_contact_points=True, with_surface_points=False, with_penetration_points=False, simplify=True
+        env_idx,
+        opacity=0.9,
+        with_contact_points=True,
+        with_surface_points=False,
+        with_penetration_points=False,
+        simplify=True,
     )
 
     data = object_plotly + hand_plotly
@@ -57,7 +62,9 @@ def get_plotly_fig(object_model, hand_model, env_idx):
     contact_hand_normals = hand_model.contact_normals
 
     device = object_model.device
-    distance, contact_normal, closest_pts = object_model.cal_distance(hand_model.get_contact_points(), with_closest_points=True)
+    distance, contact_normal, closest_pts = object_model.cal_distance(
+        hand_model.get_contact_points(), with_closest_points=True
+    )
     # show contacts nromals
     normal = contact_normal[env_idx].detach().cpu().numpy() * 0.05
     contact_points = closest_pts[env_idx].detach().cpu().numpy()

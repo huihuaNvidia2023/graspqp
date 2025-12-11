@@ -1,7 +1,5 @@
 import torch
-from theseus.optimizer.linear.dense_solver import (Any, DenseLinearization,
-                                                   DenseSolver, Dict,
-                                                   Linearization, Objective,
+from theseus.optimizer.linear.dense_solver import (Any, DenseLinearization, DenseSolver, Dict, Linearization, Objective,
                                                    Optional, Type)
 
 

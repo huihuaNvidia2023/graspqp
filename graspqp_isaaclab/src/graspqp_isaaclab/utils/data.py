@@ -74,7 +74,9 @@ def load_dexgrasp_poses(
         # Convert Euler angles to rotation matrix, then to quaternion
         rot = torch.from_numpy(np.array(euler2mat(*[qpos[name] for name in rot_names])))
         rot_quat = quat_from_matrix(rot)
-        position = torch.tensor([qpos[name] for name in translation_names], dtype=torch.float, device="cpu").unsqueeze(0)
+        position = torch.tensor([qpos[name] for name in translation_names], dtype=torch.float, device="cpu").unsqueeze(
+            0
+        )
 
         # Combine position and orientation into 7DOF pose
         pose = torch.cat([position, rot_quat.unsqueeze(0)], dim=-1)
@@ -274,8 +276,7 @@ def resolve_assets(
         )
 
         if use_fps and num_grasps > 1:
-            from pytorch3d.ops.sample_farthest_points import \
-                sample_farthest_points
+            from pytorch3d.ops.sample_farthest_points import sample_farthest_points
 
             # Reduce to num_grasps using fps
             top_poses = pose[: 3 * num_grasps]

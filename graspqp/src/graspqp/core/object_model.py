@@ -67,7 +67,9 @@ class ObjectModel:
             self._cog = self.surface_points_tensor.mean(dim=1)
         return self._cog
 
-    def initialize(self, object_code_list, sdf_library=SDF_BACKEND, resample_with_fps=True, extension=".obj", convention=None):
+    def initialize(
+        self, object_code_list, sdf_library=SDF_BACKEND, resample_with_fps=True, extension=".obj", convention=None
+    ):
         """
         Initialize Object Model with list of objects
 
@@ -88,7 +90,9 @@ class ObjectModel:
         self.surface_points_tensor = []
         for object_code in object_code_list:
             self.object_scale_tensor.append(
-                self.scale_choice[torch.randint(0, self.scale_choice.shape[0], (self.batch_size_each,), device=self.device)]
+                self.scale_choice[
+                    torch.randint(0, self.scale_choice.shape[0], (self.batch_size_each,), device=self.device)
+                ]
             )
             mesh_path = os.path.join(self.data_root_path, object_code, "coacd", "remeshed.obj")
             if not os.path.exists(mesh_path):
@@ -146,7 +150,9 @@ class ObjectModel:
                 # create warp mesh from vertices and faces
                 link_vertices, link_faces = object_verts.cpu().numpy(), object_faces.cpu().numpy()
                 verts_wp = wp.from_numpy(np.ascontiguousarray(link_vertices), device=str(self.device), dtype=wp.vec3)
-                faces_wp = wp.from_numpy(np.ascontiguousarray(link_faces.flatten()), device=str(self.device), dtype=wp.int32)
+                faces_wp = wp.from_numpy(
+                    np.ascontiguousarray(link_faces.flatten()), device=str(self.device), dtype=wp.int32
+                )
                 wp_mesh = wp.Mesh(points=verts_wp, indices=faces_wp)
 
                 self.object_face_verts_list.append(wp_mesh)

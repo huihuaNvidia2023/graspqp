@@ -1,0 +1,14 @@
+# Guided sampling: prefer fingertips but allow other links
+# Good for exploration while biasing toward better contact regions
+
+contact:
+  mode: guided
+  links:
+    - index_link_3
+    - middle_link_3
+    - thumb_link_3
+  preference_weight: 0.8  # 80% samples from preferred links
+  min_fingers: 2
+  max_contacts_per_link: 4
+
+priors: []

@@ -6,21 +6,22 @@ import argparse
 import datetime
 import math
 import os
+import time
 
 import numpy as np
 import roma
 import torch
 from tqdm import tqdm
 
-from graspqp.core import ObjectModel
+from graspqp.core import (ContactSamplingConfig, GraspPriorLoader, HierarchicalContactSampler, ObjectModel,
+                          compute_prior_energy)
 from graspqp.core.energy import calculate_energy
 from graspqp.core.initializations import initialize_convex_hull
 from graspqp.core.optimizer import AnnealingDexGraspNet, MalaStar
 from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 from graspqp.metrics import GraspSpanMetricFactory
 from graspqp.utils.plot_utils import get_plotly_fig, show_initialization
-from graspqp.utils.transforms import \
-    robust_compute_rotation_matrix_from_ortho6d
+from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 from graspqp.utils.wandb_wrapper import WandbMockup
 
 # prepare arguments
@@ -105,6 +106,14 @@ parser.add_argument("--log_to_wandb", action="store_true")
 parser.add_argument("--no_plotly", action="store_true")
 
 parser.add_argument("--hand_name", default="allegro", type=str, choices=AVAILABLE_HANDS)
+
+# Prior/contact configuration (all settings in YAML file)
+parser.add_argument(
+    "--prior_file",
+    default=None,
+    type=str,
+    help="Path to YAML/JSON config file with priors and contact sampling settings",
+)
 
 parser.add_argument("--norm_sampling", action="store_true")
 parser.add_argument("--w_svd", default=0.1, type=float)
@@ -332,6 +341,55 @@ optim_config = {
     "clip_grad": args.clip_grad,
 }
 
+# ============================================================================
+# Setup Prior & Contact Sampling from Config File
+# ============================================================================
+contact_sampler = None
+prior_pose = None
+
+if args.prior_file is not None:
+    print(f"Loading config from: {args.prior_file}")
+    prior_config = GraspPriorLoader.load_from_file(args.prior_file)
+
+    # Setup contact sampler from config
+    contact_cfg = prior_config.contact
+    if contact_cfg.mode != "uniform" or contact_cfg.links is not None:
+        contact_config = ContactSamplingConfig(
+            mode=contact_cfg.mode,
+            preferred_links=contact_cfg.links,
+            preference_weight=contact_cfg.preference_weight,
+            min_fingers=contact_cfg.min_fingers,
+            max_contacts_per_link=contact_cfg.max_contacts_per_link,
+        )
+        contact_sampler = HierarchicalContactSampler(hand_model, contact_config)
+        print(f"  Contact sampling: mode={contact_cfg.mode}, links={contact_cfg.links}")
+
+    # Setup prior poses if any priors defined
+    if prior_config.priors:
+        prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
+        prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)
+        args.w_prior = prior_config.prior_weight
+        print(f"  Loaded {len(prior_config.priors)} prior(s), weight={args.w_prior}")
+
+        # Override with per-batch contact configs if priors specify them
+        if prior_data.get("contact_configs"):
+            has_per_batch = any(cfg.mode != "uniform" for cfg in prior_data["contact_configs"])
+            if has_per_batch:
+                contact_samplers = [
+                    HierarchicalContactSampler(hand_model, cfg) for cfg in prior_data["contact_configs"]
+                ]
+                optim_config["contact_samplers"] = contact_samplers
+                contact_sampler = None  # Use per-batch samplers instead
+                print(f"  Using per-batch contact configurations")
+
+# Add contact sampler to optimizer config
+if contact_sampler is not None:
+    optim_config["contact_sampler"] = contact_sampler
+
+if prior_pose is not None:
+    optim_config["prior_pose"] = prior_pose
+    optim_config["prior_weight"] = args.w_prior
+
 if args.optimizer == "mala_star":
     optimizer = MalaStar(hand_model, **optim_config)
 elif args.optimizer == "dexgraspnet":
@@ -367,11 +425,17 @@ weight_dict = {
     "E_pen": args.w_pen,
     "E_spen": args.w_spen,
     "E_joints": args.w_joints,
-    "E_prior": args.w_prior,
+    "E_prior": args.w_prior if prior_pose is not None else 0.0,
     "E_wall": args.w_wall,
 }
 
-energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0]
+energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "E_prior"]
+
+# Print configuration summary
+if prior_pose is not None:
+    print(f"Prior energy weight: {args.w_prior}")
+if contact_sampler is not None:
+    print(f"Contact sampler configured: {args.contact_mode} mode")
 
 energy_kwargs = {}
 if args.use_gendexgrasp:
@@ -387,6 +451,10 @@ losses = calculate_energy(
     **energy_kwargs,
 )
 
+# Add prior energy if configured
+if prior_pose is not None and weight_dict["E_prior"] > 0:
+    losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
+
 energy = 0
 for loss_name, loss_value in losses.items():
     if loss_name not in weight_dict:
@@ -396,8 +464,12 @@ for loss_name, loss_value in losses.items():
 energy.sum().backward()
 optimizer.zero_grad()
 
+# Profiling
+step_times = []
+loop_start_time = time.time()
 
 for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
+    step_start = time.time()
     s = optimizer.try_step()
     reset_mask = None
 
@@ -431,6 +503,10 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
         energy_names=energy_names,
         **energy_kwargs,
     )
+
+    # Add prior energy if configured
+    if prior_pose is not None and weight_dict["E_prior"] > 0:
+        new_energies["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
 
     new_energy = 0
     for loss_name, loss_value in new_energies.items():
@@ -468,7 +544,8 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
                 "entropy/joints_entropy": joints_entropy.mean(),
                 "entropy/translation_entropy": translation_entropy.mean(),
                 "entropy/rotation_entropy": rotation_entropy.mean(),
-                "entropy/total": 0.5 * joints_entropy.mean() + 0.5 * (translation_entropy.mean() + rotation_entropy.mean()),
+                "entropy/total": 0.5 * joints_entropy.mean()
+                + 0.5 * (translation_entropy.mean() + rotation_entropy.mean()),
                 "stats/score": score.mean(),
             }
             wandb.log(data, step=step, commit=False)
@@ -518,5 +595,14 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
 
     if step % 500 == 0:
         export_poses(hand_model, energy, object_model=object_model, suffix=f"_step_{step}")
+
+    step_times.append(time.time() - step_start)
+
+# Profiling summary
+total_time = time.time() - loop_start_time
+step_times = np.array(step_times)
+print(f"\n=== Profiling Summary ===")
+print(f"Total time: {total_time:.2f}s | Steps: {len(step_times)} | Avg: {step_times.mean()*1000:.2f}ms | "
+      f"Std: {step_times.std()*1000:.2f}ms | Min: {step_times.min()*1000:.2f}ms | Max: {step_times.max()*1000:.2f}ms")
 
 export_poses(hand_model, energy, object_model=object_model, suffix="")

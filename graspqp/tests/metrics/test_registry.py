@@ -1,8 +1,7 @@
 import pytest
 import torch
 
-from graspqp.metrics import (DexgraspSpanMetric, GraspQPSpanMetric,
-                             TDGSpanMetric)
+from graspqp.metrics import DexgraspSpanMetric, GraspQPSpanMetric, TDGSpanMetric
 
 
 def test_cpu():
