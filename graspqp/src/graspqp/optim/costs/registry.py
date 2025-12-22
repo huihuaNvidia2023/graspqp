@@ -7,6 +7,7 @@ from __future__ import annotations
 from typing import Any, Callable, Dict, Type
 
 from .base import CostFunction
+from .grasp import ContactDistanceCost, ForceClosureCost, JointLimitCost, PriorPoseCost
 from .penetration import PenetrationCost, SelfPenetrationCost
 from .reference import ReferenceTrackingCost
 from .temporal import AccelerationCost, JerkCost, VelocitySmoothnessCost
@@ -86,3 +87,7 @@ CostRegistry.register("SelfPenetrationCost", SelfPenetrationCost)
 CostRegistry.register("VelocitySmoothnessCost", VelocitySmoothnessCost)
 CostRegistry.register("AccelerationCost", AccelerationCost)
 CostRegistry.register("JerkCost", JerkCost)
+CostRegistry.register("ContactDistanceCost", ContactDistanceCost)
+CostRegistry.register("ForceClosureCost", ForceClosureCost)
+CostRegistry.register("JointLimitCost", JointLimitCost)
+CostRegistry.register("PriorPoseCost", PriorPoseCost)

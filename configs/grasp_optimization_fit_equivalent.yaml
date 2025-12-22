@@ -1,0 +1,99 @@
+# Configuration equivalent to fit.py command:
+# python scripts/fit.py \
+#     --data_root_path ./objects \
+#     --object_code_list apple \
+#     --hand_name allegro \
+#     --batch_size 16 \
+#     --n_iter 500 \
+#     --prior_file configs/extracted_prior.yaml \
+#     --w_prior 100
+
+# Note: This config is for single-frame grasp optimization (T=1)
+# It mirrors the energy weights and settings from fit.py
+
+problem:
+  trajectory:
+    n_frames: 1              # Single frame = grasp synthesis
+    dt: 0.01                 # Not used for single frame
+
+  costs:
+    # E_dis: Contact distance cost
+    - type: ContactDistanceCost
+      name: E_dis
+      weight: 100.0
+      config:
+        reduction: sum
+
+    # E_fc: Force closure cost (QP-based)
+    - type: ForceClosureCost
+      name: E_fc
+      weight: 1.0
+      config:
+        friction: 0.2
+        n_cone_vecs: 4
+        svd_gain: 0.1
+
+    # E_pen: Penetration cost
+    - type: PenetrationCost
+      name: E_pen
+      weight: 100.0
+      config:
+        use_capsules: false
+
+    # E_spen: Self-penetration cost
+    - type: SelfPenetrationCost
+      name: E_spen
+      weight: 10.0
+
+    # E_joints: Joint limit cost
+    - type: JointLimitCost
+      name: E_joints
+      weight: 1.0
+
+    # E_prior: Prior pose cost (from extracted_prior.yaml)
+    - type: PriorPoseCost
+      name: E_prior
+      weight: 100.0
+      enabled: true
+
+# Note: fit.py uses MalaStar optimizer, which is an MCMC-based method
+# The new framework uses gradient-based optimizers (Adam, SGD, L-BFGS)
+# For equivalent results, use Adam with learning rate ~0.005
+optimizer:
+  type: Adam
+  config:
+    lr: 0.005
+    betas: [0.9, 0.999]
+
+runner:
+  n_iters: 500
+  callbacks:
+    - type: LoggingCallback
+      config:
+        log_every: 50
+        verbose: true
+
+# Additional settings from fit.py:
+hand:
+  name: allegro
+  grasp_type: all
+  n_contact: 8
+
+object:
+  mesh_extension: .obj
+  num_samples: 1000
+
+initialization:
+  method: convex_hull
+  jitter_strength: 0.1
+  distance_lower: 0.05
+  distance_upper: 0.1
+
+# Prior configuration (loaded from separate file)
+prior:
+  file: configs/extracted_prior.yaml
+  # Or inline:
+  # priors:
+  #   - translation: [-0.0693, -0.0231, 0.0142]
+  #     quaternion: [-0.1599, 0.8038, 0.4762, 0.3187]
+  #     joints: {...}
