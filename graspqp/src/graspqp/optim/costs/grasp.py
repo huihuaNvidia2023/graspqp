@@ -24,8 +24,16 @@ class ContactDistanceCost(PerFrameCost):
     """
     Cost to ensure contact points touch the object surface.
 
-    Equivalent to E_dis in fit.py.
-    Penalizes distance between contact points and object surface.
+    Matches fit.py's E_dis with gendexgrasp method:
+    E_dis = ((1 - sum((-vC) * nH)).exp() * distance.abs()).sum(-1)
+
+    Where:
+    - vC = contact_normal from object SDF (pointing outward from object)
+    - nH = hand_model.contact_normals (pointing outward from hand)
+    - The dot product measures alignment between hand and object normals
+
+    Config options:
+        method: "gendexgrasp" (default) or "dexgraspnet"
     """
 
     def __init__(
@@ -37,6 +45,8 @@ class ContactDistanceCost(PerFrameCost):
         aggregation: str = "sum",
     ):
         super().__init__(name, weight, enabled, config, aggregation)
+        config = config or {}
+        self.method = config.get("method", "gendexgrasp")
 
     def evaluate_frames(
         self,
@@ -57,11 +67,27 @@ class ContactDistanceCost(PerFrameCost):
         # Get contact points using cached FK
         contact_points = ctx.get_contact_points_cached(flat_hand)  # (B*T, n_contacts, 3)
 
-        # Compute SDF at contact points
-        distance, _ = ctx.object_model.cal_distance(contact_points)  # (B*T, n_contacts)
+        # Compute SDF and normals at contact points
+        distance, contact_normal = ctx.object_model.cal_distance(contact_points)  # (B*T, n_contacts)
 
-        # Cost is squared distance
-        cost = (distance**2).sum(dim=-1)  # (B*T,)
+        if self.method == "dexgraspnet":
+            # Simple method: sum of absolute distances
+            cost = distance.abs().sum(dim=-1)  # (B*T,)
+        else:
+            # gendexgrasp method (default, matches fit.py)
+            # vC = object normal (pointing outward from object)
+            # nH = hand contact normals (pointing outward from hand)
+            vC = contact_normal  # (B*T, n_contacts, 3)
+            nH = ctx.hand_model.contact_normals  # (B*T, n_contacts, 3)
+
+            # Dot product of -vC and nH: measures how aligned the normals are
+            # When contact is good, -vC (into object) aligns with nH (out of hand)
+            dot_product = torch.sum((-vC) * nH, dim=-1)  # (B*T, n_contacts)
+
+            # Cost: exp(1 - dot_product) * |distance|
+            # - When aligned (dot=1): exp(0) * |d| = |d|
+            # - When misaligned (dot=-1): exp(2) * |d| ≈ 7.4 * |d|
+            cost = ((1 - dot_product).exp() * distance.abs()).sum(dim=-1)  # (B*T,)
 
         # Reshape to (B, T)
         return cost.reshape(B, T)
@@ -184,7 +210,10 @@ class PriorPoseCost(PerFrameCost):
     """
     Cost to stay close to a prior hand pose.
 
-    Equivalent to E_prior in fit.py.
+    Matches fit.py's compute_prior_energy:
+    - Translation: L2 distance
+    - Rotation: Geodesic distance using 6D ortho representation
+    - Joints: L2 distance with 0.1 weight
     """
 
     def __init__(
@@ -210,9 +239,16 @@ class PriorPoseCost(PerFrameCost):
         """
         Compute per-frame prior pose cost.
 
+        Matches compute_prior_energy:
+        - E_trans = (translation_diff ** 2).sum(-1)
+        - E_rot = geodesic_distance(R_current, R_prior)
+        - E_joints = (joint_diff ** 2).sum(-1) * 0.1
+
         Returns:
             Per-frame costs. Shape: (B, T)
         """
+        from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
+
         B, T, D = state.hand_states.shape
         device = state.device
 
@@ -222,7 +258,6 @@ class PriorPoseCost(PerFrameCost):
         # Flatten to (B*T, D)
         flat_hand = state.flat_hand
 
-        # Compute L2 distance to prior
         # Prior shape should be (B*T, D) or (B, D) for broadcasting
         if self._prior_pose.dim() == 2 and self._prior_pose.shape[0] == B:
             # (B, D) -> expand to (B*T, D) by repeating for each frame
@@ -230,7 +265,24 @@ class PriorPoseCost(PerFrameCost):
         else:
             prior = self._prior_pose
 
-        cost = ((flat_hand - prior) ** 2).sum(dim=-1)  # (B*T,)
+        # Translation deviation (first 3 dims)
+        E_trans = ((flat_hand[:, :3] - prior[:, :3]) ** 2).sum(-1)
+
+        # Rotation deviation (geodesic distance, dims 3:9)
+        R_current = robust_compute_rotation_matrix_from_ortho6d(flat_hand[:, 3:9])
+        R_prior = robust_compute_rotation_matrix_from_ortho6d(prior[:, 3:9])
+
+        # Geodesic distance: arccos((trace(R1^T R2) - 1) / 2)
+        R_diff = R_current.transpose(1, 2) @ R_prior
+        trace = R_diff[:, 0, 0] + R_diff[:, 1, 1] + R_diff[:, 2, 2]
+        E_rot = torch.acos(torch.clamp((trace - 1) / 2, -1 + 1e-7, 1 - 1e-7))
+
+        # Joint deviation (dims 9:, with 0.1 weight as in compute_prior_energy)
+        E_joints = ((flat_hand[:, 9:] - prior[:, 9:]) ** 2).sum(-1) * 0.1
+
+        # Total (NOTE: compute_prior_energy multiplies by prior_weight internally,
+        # but we handle weight in the base class, so just return the sum)
+        cost = E_trans + E_rot + E_joints  # (B*T,)
 
         # Reshape to (B, T)
         return cost.reshape(B, T)

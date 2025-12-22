@@ -8,8 +8,9 @@ This is a gradient-based MCMC sampler with:
 - Metropolis-Hastings accept/reject
 - Optional contact point switching (for grasp generation mode)
 
-IMPORTANT: This optimizer works directly with hand_model.hand_pose (like fit.py)
-because set_parameters() breaks the computation graph.
+The key insight is that gradients must flow through hand_model properties.
+We compute energy using the costs, but the gradient accumulates on
+hand_model.hand_pose.
 """
 
 from __future__ import annotations
@@ -18,7 +19,6 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import Tensor
-from torch.distributions import Normal
 
 from .base import Optimizer
 
@@ -26,15 +26,15 @@ if TYPE_CHECKING:
     from ..problem import OptimizationProblem
     from ..state import TrajectoryState
 
-normal = Normal(0, 1)
-
 
 class MalaStarOptimizer(Optimizer):
     """
     MALA* optimizer from GraspQP, adapted for the new framework.
 
-    IMPORTANT: Works directly with hand_model.hand_pose to preserve gradients.
-    The state is only used for storage/export, not for gradient computation.
+    This optimizer:
+    1. Uses gradients from problem.total_energy() for proposals
+    2. Applies Metropolis-Hastings accept/reject
+    3. Optionally samples new contact points
     """
 
     def __init__(
@@ -65,9 +65,8 @@ class MalaStarOptimizer(Optimizer):
         # State variables (initialized on first step)
         self._ema_grad: Optional[Tensor] = None
         self._per_batch_step: Optional[Tensor] = None
-        self._old_hand_pose: Optional[Tensor] = None
-        self._old_contact_indices: Optional[Tensor] = None
         self._current_energy: Optional[Tensor] = None
+        self._initialized: bool = False
 
     def step(
         self,
@@ -77,8 +76,9 @@ class MalaStarOptimizer(Optimizer):
         """
         Perform one MALA* optimization step.
 
-        Works directly with hand_model.hand_pose to preserve gradients,
-        matching fit.py's approach exactly.
+        Flow:
+        1. If first call: compute initial energy and gradient, return
+        2. Otherwise: use gradient to propose, compute new energy, accept/reject
         """
         device = state.device
         hand_model = problem.context.hand_model
@@ -94,13 +94,17 @@ class MalaStarOptimizer(Optimizer):
             self._ema_grad = torch.zeros(D_hand, dtype=torch.float, device=device)
 
         # =====================================================================
+        # First call: just compute initial gradient, don't do proposal yet
+        # =====================================================================
+        if not self._initialized:
+            self._compute_energy_and_grad(problem, hand_model)
+            self._initialized = True
+            # Return state unchanged for first call
+            return state
+
+        # =====================================================================
         # 1. Try step: propose new parameters using gradient
         # =====================================================================
-        # Ensure hand_model.hand_pose has gradient
-        if hand_model.hand_pose.grad is None:
-            # Need to do initial forward/backward pass
-            self._compute_energy_and_grad(problem)
-
         # Compute step size with decay
         s = self.step_size * (self.temperature_decay ** (self._per_batch_step // self.stepsize_period))
         step_size = s.unsqueeze(-1)  # (B, 1)
@@ -116,7 +120,7 @@ class MalaStarOptimizer(Optimizer):
             grad[torch.isnan(grad)] = 0
 
         # Update EMA of squared gradients (RMSProp-style)
-        mean_grad_sq = (grad**2).mean(0)  # (D_hand,)
+        mean_grad_sq = (grad ** 2).mean(0)  # (D_hand,)
         self._ema_grad = self.mu * mean_grad_sq + (1 - self.mu) * self._ema_grad
 
         # Handle NaN in EMA
@@ -127,39 +131,37 @@ class MalaStarOptimizer(Optimizer):
         normalized_grad = grad / (torch.sqrt(self._ema_grad) + 1e-6)
 
         # Propose new hand pose
-        proposed_pose = hand_model.hand_pose - step_size * normalized_grad
+        with torch.no_grad():
+            proposed_pose = hand_model.hand_pose.detach() - step_size * normalized_grad.detach()
 
-        # Handle NaN in proposal
-        if proposed_pose.isnan().any():
-            nan_mask = proposed_pose.isnan().any(dim=-1)
-            proposed_pose[nan_mask] = hand_model.hand_pose[nan_mask]
+            # Handle NaN in proposal
+            if proposed_pose.isnan().any():
+                nan_mask = proposed_pose.isnan().any(dim=-1)
+                proposed_pose[nan_mask] = hand_model.hand_pose[nan_mask].detach()
 
         # =====================================================================
         # 2. Sample new contact indices (if not fixed)
         # =====================================================================
         if self.fix_contacts:
-            contact_indices = hand_model.contact_point_indices.clone()
+            new_contact_indices = hand_model.contact_point_indices.clone()
         else:
-            contact_indices = self._sample_contacts(hand_model, problem.context, device)
+            new_contact_indices = self._sample_contacts(hand_model, problem.context, device)
 
         # =====================================================================
-        # 3. Save old state and set new parameters
+        # 3. Save old state
         # =====================================================================
-        self._old_hand_pose = hand_model.hand_pose.detach().clone()
-        self._old_contact_indices = hand_model.contact_point_indices.clone()
-        old_energy = self._current_energy
-
-        # Set new parameters
-        hand_model.set_parameters(proposed_pose, contact_indices)
-
-        # Zero grad for new computation
-        if hand_model.hand_pose.grad is not None:
-            hand_model.hand_pose.grad.zero_()
+        old_hand_pose = hand_model.hand_pose.detach().clone()
+        old_contact_indices = hand_model.contact_point_indices.clone()
+        old_energy = self._current_energy.clone()
 
         # =====================================================================
-        # 4. Compute new energy
+        # 4. Set new parameters and compute new energy
         # =====================================================================
-        new_energy = self._compute_energy_and_grad(problem)
+        # Use set_parameters which creates a fresh tensor (like fit.py)
+        hand_model.set_parameters(proposed_pose, new_contact_indices)
+
+        # Compute new energy and gradient (creates fresh graph)
+        new_energy = self._compute_energy_and_grad(problem, hand_model)
 
         # =====================================================================
         # 5. Accept/reject using Metropolis-Hastings
@@ -168,21 +170,16 @@ class MalaStarOptimizer(Optimizer):
             self.temperature_decay ** (self._per_batch_step // self.annealing_period)
         )
 
-        alpha = torch.rand(B, dtype=torch.float, device=device)
-        accept = alpha < torch.exp((old_energy - new_energy) / temperature)
-
-        # =====================================================================
-        # 6. Apply accept/reject
-        # =====================================================================
         with torch.no_grad():
+            alpha = torch.rand(B, dtype=torch.float, device=device)
+            accept = alpha < torch.exp((old_energy - new_energy) / temperature)
             reject = ~accept
 
             # Restore rejected states
-            hand_model.hand_pose[reject] = self._old_hand_pose[reject]
-            hand_model.contact_point_indices[reject] = self._old_contact_indices[reject]
-
-            # Update current energy
-            self._current_energy[accept] = new_energy[accept]
+            if reject.any():
+                hand_model.hand_pose[reject] = old_hand_pose[reject]
+                hand_model.contact_point_indices[reject] = old_contact_indices[reject]
+                self._current_energy[reject] = old_energy[reject]
 
             # Recompute FK for consistency
             hand_model.current_status = hand_model.fk(hand_model.hand_pose[:, 9:])
@@ -192,44 +189,58 @@ class MalaStarOptimizer(Optimizer):
         self._step_count += 1
 
         # =====================================================================
-        # 7. Return updated state (sync from hand_model)
+        # 6. Return updated state (sync from hand_model)
         # =====================================================================
         final_state = state.clone()
         final_state.hand_states = hand_model.hand_pose.detach().unsqueeze(1)  # (B, 1, D_hand)
 
         return final_state
 
-    def _compute_energy_and_grad(self, problem: "OptimizationProblem") -> Tensor:
-        """Compute energy and backprop to get gradients on hand_model.hand_pose."""
-        hand_model = problem.context.hand_model
+    def _compute_energy_and_grad(self, problem: "OptimizationProblem", hand_model) -> Tensor:
+        """
+        Compute energy and backprop to get gradients.
 
-        # Ensure requires_grad
-        hand_model.hand_pose.requires_grad_(True)
-
-        # Clear cache
+        Like fit.py: hand_model is already configured via set_parameters.
+        We just need to compute energy and call backward().
+        """
+        # Clear step cache
         problem.context.clear_step_cache()
 
-        # Create a temporary state from hand_model
-        temp_state = problem.context.hand_model.hand_pose.unsqueeze(1)  # (B, 1, D)
+        # Skip set_parameters in costs - hand is already configured
+        problem.context._skip_set_parameters = True
 
-        # Compute energy through problem (but hand_model already set)
-        from ..state import TrajectoryState
+        try:
+            # Ensure hand_model.hand_pose has requires_grad
+            hand_model.hand_pose.requires_grad_(True)
 
-        dummy_state = TrajectoryState(
-            hand_states=temp_state,
-            object_states=torch.zeros(temp_state.shape[0], 1, 7, device=temp_state.device),
-        )
+            # Create state from current hand_model.hand_pose
+            from ..state import TrajectoryState
 
-        # Compute energy
-        energy = problem.total_energy(dummy_state)  # (B,)
+            B = hand_model.hand_pose.shape[0]
+            device = hand_model.hand_pose.device
 
-        # Store for next iteration
-        self._current_energy = energy.detach().clone()
+            hand_states = hand_model.hand_pose.unsqueeze(1)  # (B, 1, D)
+            object_states = torch.zeros(B, 1, 7, device=device)
+            object_states[:, :, 6] = 1.0  # Identity quaternion
 
-        # Backward
-        energy.sum().backward()
+            temp_state = TrajectoryState(
+                hand_states=hand_states,
+                object_states=object_states,
+            )
 
-        return energy.detach()
+            # Compute energy using costs (they access hand_model properties)
+            energy = problem.total_energy(temp_state)  # (B,)
+
+            # Store for accept/reject
+            self._current_energy = energy.detach().clone()
+
+            # Backward to get gradients on hand_model.hand_pose
+            energy.sum().backward()
+
+            return energy.detach()
+        finally:
+            # Restore normal mode
+            problem.context._skip_set_parameters = False
 
     def _sample_contacts(
         self,
@@ -267,9 +278,8 @@ class MalaStarOptimizer(Optimizer):
         super().reset()
         self._ema_grad = None
         self._per_batch_step = None
-        self._old_hand_pose = None
-        self._old_contact_indices = None
         self._current_energy = None
+        self._initialized = False
 
     def reset_envs(self, mask: Tensor):
         """Reset specific environments."""
@@ -279,15 +289,13 @@ class MalaStarOptimizer(Optimizer):
     def get_diagnostics(self) -> Dict[str, Any]:
         """Get diagnostic information."""
         diag = super().get_diagnostics()
-        diag.update(
-            {
-                "fix_contacts": self.fix_contacts,
-                "switch_possibility": self.switch_possibility,
-                "starting_temperature": self.starting_temperature,
-                "temperature_decay": self.temperature_decay,
-                "step_size": self.step_size,
-            }
-        )
+        diag.update({
+            "fix_contacts": self.fix_contacts,
+            "switch_possibility": self.switch_possibility,
+            "starting_temperature": self.starting_temperature,
+            "temperature_decay": self.temperature_decay,
+            "step_size": self.step_size,
+        })
         if self._per_batch_step is not None:
             diag["mean_step"] = self._per_batch_step.float().mean().item()
         return diag

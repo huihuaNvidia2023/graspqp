@@ -67,6 +67,10 @@ class OptimizationContext:
         # Current contact indices (updated by optimizer during sampling)
         self._current_contact_indices: Optional[Tensor] = None
 
+        # Flag to skip set_parameters (for gradient computation mode)
+        # When True, costs should assume hand_model is already configured
+        self._skip_set_parameters: bool = False
+
     @property
     def contact_fingers(self) -> Optional[List[str]]:
         """Get list of fingers that should be in contact."""
@@ -238,6 +242,9 @@ class OptimizationContext:
         This avoids redundant FK computation when multiple costs call this
         with the same hand state in the same optimization step.
 
+        When _skip_set_parameters is True (gradient mode), we skip calling
+        set_parameters but still recompute FK to ensure gradients flow through.
+
         Args:
             flat_hand: Flattened hand states, shape (N, D_hand)
         """
@@ -248,11 +255,16 @@ class OptimizationContext:
         current_ptr = flat_hand.data_ptr()
 
         if cached_ptr != current_ptr:
-            # Hand state changed - recompute FK
-            if self._current_contact_indices is not None:
-                self.hand_model.set_parameters(flat_hand, contact_point_indices=self._current_contact_indices)
+            if self._skip_set_parameters:
+                # In gradient mode: just recompute FK without set_parameters
+                # This preserves gradient flow through hand_pose
+                self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
             else:
-                self.hand_model.set_parameters(flat_hand)
+                # Normal mode: full set_parameters
+                if self._current_contact_indices is not None:
+                    self.hand_model.set_parameters(flat_hand, contact_point_indices=self._current_contact_indices)
+                else:
+                    self.hand_model.set_parameters(flat_hand)
             self.set_cached(cache_key, current_ptr, scope="step")
 
     def get_contact_points_cached(self, flat_hand: Tensor) -> Tensor:

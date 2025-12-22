@@ -21,8 +21,12 @@ class PenetrationCost(PerFrameCost):
     """
     Cost to prevent hand-object penetration.
 
-    Computes SDF values for hand surface points and penalizes negative values
-    (indicating penetration into the object).
+    Matches fit.py's E_pen computation:
+    - Get object's surface points
+    - Compute hand model's SDF at those points
+    - Penalize positive values (object points INSIDE hand)
+
+    This checks if the object is penetrating INTO the hand.
 
     Config options:
         use_capsules: Use capsule approximation for speed (default: False)
@@ -55,37 +59,44 @@ class PenetrationCost(PerFrameCost):
         """
         Compute per-frame penetration cost.
 
+        Matches fit.py's E_pen:
+        - object_surface_points = object_model.surface_points_tensor * object_scale
+        - distances = hand_model.cal_distance(object_surface_points)
+        - distances[distances <= 0] = 0  # Interior is positive in hand SDF
+        - E_pen = distances.sum(-1)
+
         Returns:
             Per-frame costs. Shape: (B, T)
         """
         B, T, D = state.hand_states.shape
+        device = state.device
 
-        # Flatten to (B*T, D) for batched FK
+        # Ensure hand model is configured
         flat_hand = state.flat_hand  # (B*T, D)
+        ctx.ensure_hand_configured(flat_hand)
 
-        # Get surface points using cached FK
-        if self.use_capsules:
-            # TODO: Implement capsule proxy
-            surface_points = ctx.get_surface_points_cached(flat_hand, n_subsample=self.n_surface_points)
-        else:
-            surface_points = ctx.get_surface_points_cached(flat_hand, n_subsample=self.n_surface_points)
+        # Get OBJECT's surface points (not hand's!)
+        # Same as fit.py: object_model.surface_points_tensor * object_scale
+        object_scale = ctx.object_model.object_scale_tensor.flatten().unsqueeze(1).unsqueeze(2)
+        object_surface_points = ctx.object_model.surface_points_tensor * object_scale  # (B*T, n_samples, 3)
 
-        # Compute SDF values
-        # Note: Since we're using Hand_T_Object coordinates, points are already in object frame
-        sdf_values, _ = ctx.object_model.cal_distance(surface_points)  # (B*T, n_pts)
+        # Compute HAND's SDF at object surface points
+        # hand_model.cal_distance: interior is positive, exterior is negative
+        distances = ctx.hand_model.cal_distance(object_surface_points)  # (B*T, n_samples)
 
-        # Penetration = max(0, -sdf) (negative sdf means inside object)
-        penetration = F.relu(-sdf_values)  # (B*T, n_pts)
+        # Penalize positive values (object points inside hand)
+        distances = distances.clone()
+        distances[distances <= 0] = 0
 
         # Sum over points
-        per_config = penetration.sum(dim=-1)  # (B*T,)
+        per_config = distances.sum(dim=-1)  # (B*T,)
 
         # Reshape to (B, T)
         per_frame = per_config.reshape(B, T)
 
         # Cache for debugging
-        ctx.set_cached("hand_sdf", sdf_values.detach(), scope="step")
-        ctx.set_cached("penetration_depth", penetration.detach(), scope="step")
+        ctx.set_cached("hand_sdf", distances.detach(), scope="step")
+        ctx.set_cached("penetration_depth", distances.detach(), scope="step")
 
         return per_frame
 
