@@ -800,6 +800,8 @@ Recommendation: Start with Option A (batched), add Option B export if needed.
 | Q17 | Hand representation? | **Support both MANO (human) and robot hands (Allegro, etc.)** |
 | Q18 | Batch loading strategy? | **Define data interface now** - no existing pipeline, design clean API |
 | Q19 | Convergence criteria? | **Flexible/customizable**: fixed iterations, energy threshold, early stopping (success or failure) |
+| Q20 | Variable-length trajectories? | **Padding + masking** - pad to max length in batch, use mask for valid frames |
+| Q21 | Multiple optimization runs? | **Yes, K perturbations per trajectory** - increases chance of finding valid solution |
 
 ---
 
@@ -845,6 +847,200 @@ Recommendation: Start with Option A (batched), add Option B export if needed.
 - [ ] Weight scheduling
 - [ ] Confidence-weighted reference tracking
 - [ ] Trajectory visualization module
+
+---
+
+## Batch Processing at Scale
+
+### Variable-Length Trajectories
+
+Millions of trajectories with different lengths (T varies, max 30):
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                         Padding + Masking                                   │
+├─────────────────────────────────────────────────────────────────────────────┤
+│  Batch of B trajectories, pad to T_max:                                    │
+│                                                                             │
+│  hand_states: Tensor[B, T_max, D_hand]                                     │
+│  valid_mask:  Tensor[B, T_max]  # 1 for valid, 0 for padding               │
+│  lengths:     Tensor[B]         # actual length of each trajectory         │
+│                                                                             │
+│  Example (T_max=8):                                                        │
+│  Traj 0: [f0, f1, f2, f3, f4, PAD, PAD, PAD]  mask=[1,1,1,1,1,0,0,0]       │
+│  Traj 1: [f0, f1, f2, f3, f4, f5, f6, f7]     mask=[1,1,1,1,1,1,1,1]       │
+│  Traj 2: [f0, f1, f2, PAD, PAD, PAD, PAD, PAD] mask=[1,1,1,0,0,0,0,0]      │
+│                                                                             │
+│  Masked energy computation:                                                │
+│    per_frame_energy: (B, T_max)                                            │
+│    masked_energy = (per_frame_energy * valid_mask).sum(dim=1)              │
+│    normalized = masked_energy / lengths  # optional: per-frame average    │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Multi-Perturbation Optimization
+
+Run K perturbations per trajectory to increase success rate:
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│                    Two-Level Batching: (B, K, T, D)                        │
+├─────────────────────────────────────────────────────────────────────────────┤
+│                                                                             │
+│  B = number of different video trajectories (e.g., 64)                     │
+│  K = perturbation attempts per trajectory (e.g., 8)                        │
+│  T = trajectory length (padded to T_max)                                   │
+│  D = state dimension                                                       │
+│                                                                             │
+│  Reference: (B, T, D)      ← original video, no K dimension                │
+│  Initial:   (B, K, T, D)   ← K perturbed copies of each reference          │
+│  Optimized: (B, K, T, D)   ← after optimization                            │
+│                                                                             │
+│  For computation: flatten to (B*K, T, D) = (512, 30, D)                    │
+│  After optimization: reshape back to (B, K, T, D)                          │
+│                                                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Perturbation generation:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  reference: (B, T, D)                                                      │
+│  noise = torch.randn(B, K, T, D) * perturbation_scale                     │
+│  initial = reference.unsqueeze(1) + noise  # (B, K, T, D)                 │
+│                                                                             │
+│  Perturbation strategies:                                                  │
+│  - Gaussian noise (simple)                                                 │
+│  - Structured noise (more on position, less on fingers)                   │
+│  - Temporal smoothing of noise                                             │
+└─────────────────────────────────────────────────────────────────────────────┘
+
+Result selection:
+┌─────────────────────────────────────────────────────────────────────────────┐
+│  After optimization:                                                       │
+│  energies: (B, K)          ← total energy per trajectory per perturbation │
+│  valid: (B, K)             ← binary mask: constraints satisfied?          │
+│                                                                             │
+│  Selection strategies:                                                     │
+│  1. Best valid: argmin(energies) where valid==True                        │
+│  2. Best overall: argmin(energies) regardless of validity                 │
+│  3. All valid: return all (B, K) that satisfy constraints                 │
+│  4. Failure: if no K attempts valid, mark trajectory as unfixable         │
+└─────────────────────────────────────────────────────────────────────────────┘
+```
+
+### Updated TrajectoryState
+
+```python
+class TrajectoryState:
+    """Supports both single and multi-perturbation optimization"""
+    
+    def __init__(
+        self,
+        hand_states: Tensor,       # (B, T, D) or (B, K, T, D)
+        object_states: Tensor,     # (B, T, D) or (B, K, T, D)
+        valid_mask: Tensor,        # (B, T) or (B, K, T)
+        dt: float = 0.1,
+    ):
+        self.hand_states = hand_states
+        self.object_states = object_states
+        self.valid_mask = valid_mask
+        self.dt = dt
+        
+        # Detect layout
+        if hand_states.dim() == 3:
+            self.B, self.T, self.D_hand = hand_states.shape
+            self.K = 1
+            self._has_perturbations = False
+        else:
+            self.B, self.K, self.T, self.D_hand = hand_states.shape
+            self._has_perturbations = True
+    
+    @property
+    def flat(self) -> "TrajectoryState":
+        """Flatten (B, K, T, D) to (B*K, T, D) for computation"""
+        if not self._has_perturbations:
+            return self
+        return TrajectoryState(
+            hand_states=self.hand_states.reshape(self.B * self.K, self.T, -1),
+            object_states=self.object_states.reshape(self.B * self.K, self.T, -1),
+            valid_mask=self.valid_mask.reshape(self.B * self.K, self.T),
+            dt=self.dt,
+        )
+    
+    def unflatten(self, B: int, K: int) -> "TrajectoryState":
+        """Reshape (B*K, T, D) back to (B, K, T, D)"""
+        return TrajectoryState(
+            hand_states=self.hand_states.reshape(B, K, self.T, -1),
+            object_states=self.object_states.reshape(B, K, self.T, -1),
+            valid_mask=self.valid_mask.reshape(B, K, self.T),
+            dt=self.dt,
+        )
+    
+    @staticmethod
+    def from_reference(
+        reference: "ReferenceTrajectory",
+        n_perturbations: int = 1,
+        perturbation_scale: float = 0.01,
+    ) -> "TrajectoryState":
+        """Create initial state with K perturbations from reference"""
+        B, T, D_hand = reference.hand_states.shape
+        K = n_perturbations
+        
+        if K == 1:
+            return TrajectoryState(
+                hand_states=reference.hand_states.clone(),
+                object_states=reference.object_states.clone(),
+                valid_mask=reference.valid_mask.clone(),
+            )
+        
+        # Generate K perturbations
+        hand_noise = torch.randn(B, K, T, D_hand) * perturbation_scale
+        obj_noise = torch.randn(B, K, T, reference.object_states.shape[-1]) * perturbation_scale
+        
+        return TrajectoryState(
+            hand_states=reference.hand_states.unsqueeze(1) + hand_noise,
+            object_states=reference.object_states.unsqueeze(1) + obj_noise,
+            valid_mask=reference.valid_mask.unsqueeze(1).expand(B, K, T),
+        )
+```
+
+### Result Selection
+
+```python
+class ResultSelector:
+    """Select best results from multi-perturbation optimization"""
+    
+    @staticmethod
+    def select_best_valid(
+        state: TrajectoryState,      # (B, K, T, D)
+        energies: Tensor,            # (B, K)
+        valid: Tensor,               # (B, K) bool
+    ) -> Tuple[TrajectoryState, Tensor, Tensor]:
+        """
+        Returns:
+          - best_state: (B, T, D) - best valid trajectory per batch
+          - best_energy: (B,) - energy of selected trajectory
+          - success: (B,) bool - whether any valid solution found
+        """
+        # Mask invalid with large energy
+        masked_energies = energies.clone()
+        masked_energies[~valid] = float('inf')
+        
+        # Find best per batch
+        best_k = masked_energies.argmin(dim=1)  # (B,)
+        success = valid.any(dim=1)               # (B,)
+        
+        # Gather best trajectories
+        B = state.B
+        best_hand = state.hand_states[torch.arange(B), best_k]      # (B, T, D)
+        best_object = state.object_states[torch.arange(B), best_k]  # (B, T, D)
+        best_energy = energies[torch.arange(B), best_k]             # (B,)
+        
+        return (
+            TrajectoryState(best_hand, best_object, state.valid_mask[:, 0]),
+            best_energy,
+            success,
+        )
+```
 
 ---
 
@@ -1181,4 +1377,18 @@ optimized_state.to_trajectory_dict("output/optimized_001.pt")
 3. HandModelInterface abstraction for multi-hand support
 4. Convergence criteria framework with multiple stopping conditions
 5. Contact specification format
+
+### 2025-01-22: Scale & Robustness
+
+**New questions answered:**
+- Q20: Variable-length trajectories → padding + masking
+- Q21: Multiple optimization runs → K perturbations per trajectory
+
+**New design elements:**
+1. Two-level batching: (B, K, T, D) for B trajectories × K perturbations
+2. Valid mask for variable-length trajectories
+3. Perturbation generation from reference
+4. Result selection strategies (best valid, all valid, failure detection)
+5. TrajectoryState.from_reference() with perturbation support
+6. ResultSelector for post-optimization selection
 
