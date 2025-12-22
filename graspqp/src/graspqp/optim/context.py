@@ -226,3 +226,76 @@ class OptimizationContext:
         """
         distance, _ = self.object_model.cal_distance(points)
         return distance
+
+    # ========================================================================
+    # Hand Model Caching - avoid redundant FK computation
+    # ========================================================================
+
+    def ensure_hand_configured(self, flat_hand: Tensor) -> None:
+        """
+        Ensure hand model is configured with given pose, skipping if already set.
+
+        This avoids redundant FK computation when multiple costs call this
+        with the same hand state in the same optimization step.
+
+        Args:
+            flat_hand: Flattened hand states, shape (N, D_hand)
+        """
+        cache_key = "_hand_configured_ptr"
+        cached_ptr = self.get_cached(cache_key)
+
+        # Fast identity check using data pointer
+        current_ptr = flat_hand.data_ptr()
+
+        if cached_ptr != current_ptr:
+            # Hand state changed - recompute FK
+            if self._current_contact_indices is not None:
+                self.hand_model.set_parameters(flat_hand, contact_point_indices=self._current_contact_indices)
+            else:
+                self.hand_model.set_parameters(flat_hand)
+            self.set_cached(cache_key, current_ptr, scope="step")
+
+    def get_contact_points_cached(self, flat_hand: Tensor) -> Tensor:
+        """
+        Get contact points, using cache if hand state unchanged.
+
+        Args:
+            flat_hand: Flattened hand states, shape (N, D_hand)
+
+        Returns:
+            Contact points, shape (N, n_contacts, 3)
+        """
+        self.ensure_hand_configured(flat_hand)
+        return self.hand_model.contact_points
+
+    def get_surface_points_cached(self, flat_hand: Tensor, n_subsample: Optional[int] = None) -> Tensor:
+        """
+        Get surface points, using cache if hand state unchanged.
+
+        Args:
+            flat_hand: Flattened hand states, shape (N, D_hand)
+            n_subsample: If set, subsample to this many points (cached per step)
+
+        Returns:
+            Surface points, shape (N, n_pts, 3)
+        """
+        self.ensure_hand_configured(flat_hand)
+
+        cache_key = "_surface_points"
+        if n_subsample is not None:
+            cache_key = f"_surface_points_{n_subsample}"
+
+        cached = self.get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        # Compute surface points
+        surface_points = self.hand_model.get_surface_points()
+
+        # Subsample if needed
+        if n_subsample is not None and surface_points.shape[1] > n_subsample:
+            idx = torch.randperm(surface_points.shape[1], device=surface_points.device)[:n_subsample]
+            surface_points = surface_points[:, idx]
+
+        self.set_cached(cache_key, surface_points, scope="step")
+        return surface_points

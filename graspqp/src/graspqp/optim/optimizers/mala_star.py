@@ -116,7 +116,7 @@ class MalaStarOptimizer(Optimizer):
             grad[torch.isnan(grad)] = 0
 
         # Update EMA of squared gradients (RMSProp-style)
-        mean_grad_sq = (grad ** 2).mean(0)  # (D_hand,)
+        mean_grad_sq = (grad**2).mean(0)  # (D_hand,)
         self._ema_grad = self.mu * mean_grad_sq + (1 - self.mu) * self._ema_grad
 
         # Handle NaN in EMA
@@ -214,6 +214,7 @@ class MalaStarOptimizer(Optimizer):
 
         # Compute energy through problem (but hand_model already set)
         from ..state import TrajectoryState
+
         dummy_state = TrajectoryState(
             hand_states=temp_state,
             object_states=torch.zeros(temp_state.shape[0], 1, 7, device=temp_state.device),
@@ -278,13 +279,15 @@ class MalaStarOptimizer(Optimizer):
     def get_diagnostics(self) -> Dict[str, Any]:
         """Get diagnostic information."""
         diag = super().get_diagnostics()
-        diag.update({
-            "fix_contacts": self.fix_contacts,
-            "switch_possibility": self.switch_possibility,
-            "starting_temperature": self.starting_temperature,
-            "temperature_decay": self.temperature_decay,
-            "step_size": self.step_size,
-        })
+        diag.update(
+            {
+                "fix_contacts": self.fix_contacts,
+                "switch_possibility": self.switch_possibility,
+                "starting_temperature": self.starting_temperature,
+                "temperature_decay": self.temperature_decay,
+                "step_size": self.step_size,
+            }
+        )
         if self._per_batch_step is not None:
             diag["mean_step"] = self._per_batch_step.float().mean().item()
         return diag

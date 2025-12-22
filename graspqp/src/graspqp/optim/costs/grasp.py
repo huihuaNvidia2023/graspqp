@@ -50,14 +50,12 @@ class ContactDistanceCost(PerFrameCost):
             Per-frame costs. Shape: (B, T)
         """
         B, T, D = state.hand_states.shape
-        device = state.device
 
         # Flatten to (B*T, D) for batched FK
         flat_hand = state.flat_hand
 
-        # Set hand parameters and get contact points
-        ctx.hand_model.set_parameters(flat_hand)
-        contact_points = ctx.hand_model.contact_points  # (B*T, n_contacts, 3)
+        # Get contact points using cached FK
+        contact_points = ctx.get_contact_points_cached(flat_hand)  # (B*T, n_contacts, 3)
 
         # Compute SDF at contact points
         distance, _ = ctx.object_model.cal_distance(contact_points)  # (B*T, n_contacts)
@@ -115,9 +113,8 @@ class ForceClosureCost(PerFrameCost):
         # Flatten to (B*T, D)
         flat_hand = state.flat_hand
 
-        # Set hand parameters
-        ctx.hand_model.set_parameters(flat_hand)
-        contact_points = ctx.hand_model.contact_points
+        # Get contact points using cached FK
+        contact_points = ctx.get_contact_points_cached(flat_hand)
 
         # Get contact normals from SDF
         distance, contact_normal = ctx.object_model.cal_distance(contact_points)
@@ -170,8 +167,8 @@ class JointLimitCost(PerFrameCost):
         # Flatten to (B*T, D)
         flat_hand = state.flat_hand
 
-        # Set hand parameters
-        ctx.hand_model.set_parameters(flat_hand)
+        # Ensure hand model is configured (uses cache)
+        ctx.ensure_hand_configured(flat_hand)
 
         # Get joint limit violation from hand model
         if hasattr(ctx.hand_model, "get_joint_limits_violations"):

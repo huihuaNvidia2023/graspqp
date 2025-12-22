@@ -3,8 +3,8 @@ Optimizers for trajectory optimization.
 """
 
 from .base import Optimizer
-from .torch_optim import AdamOptimizer, SGDOptimizer, LBFGSOptimizer
 from .mala_star import MalaStarOptimizer
+from .torch_optim import AdamOptimizer, LBFGSOptimizer, SGDOptimizer
 
 __all__ = [
     "Optimizer",
@@ -13,4 +13,3 @@ __all__ = [
     "LBFGSOptimizer",
     "MalaStarOptimizer",
 ]
-

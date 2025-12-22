@@ -37,19 +37,16 @@ import torch
 from tqdm import tqdm
 
 # Import from existing graspqp modules
-from graspqp.core import GraspPriorLoader, ObjectModel
-from graspqp.core.initializations import initialize_convex_hull
-from graspqp.hands import AVAILABLE_HANDS, get_hand_model
-from graspqp.metrics import GraspSpanMetricFactory
-from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
-
+from graspqp.core import GraspPriorLoader, ObjectModel, compute_prior_energy
 # Import from existing graspqp modules (use same energy as fit.py)
 from graspqp.core.energy import calculate_energy
-from graspqp.core import compute_prior_energy
+from graspqp.core.initializations import initialize_convex_hull
 from graspqp.core.optimizer import MalaStar
-
+from graspqp.hands import AVAILABLE_HANDS, get_hand_model
+from graspqp.metrics import GraspSpanMetricFactory
 # Import from NEW optimization framework (for state representation)
 from graspqp.optim.state import TrajectoryState
+from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
 
 def parse_args():
@@ -380,8 +377,9 @@ def main():
     print("\n" + "=" * 70)
     print("=== Final Results ===")
     print("=" * 70)
-    print(f"Energy: best={energy.min().item():.2f}, mean={energy.mean().item():.2f}, "
-          f"worst={energy.max().item():.2f}")
+    print(
+        f"Energy: best={energy.min().item():.2f}, mean={energy.mean().item():.2f}, " f"worst={energy.max().item():.2f}"
+    )
     print("Breakdown:")
     for k, v in losses.items():
         print(f"  {k}: mean={v.mean().item():.4f}, min={v.min().item():.4f}")

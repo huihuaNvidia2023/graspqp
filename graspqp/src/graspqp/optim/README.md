@@ -154,4 +154,3 @@ python -m unittest tests/optim/test_state.py -v
 python -m unittest tests/optim/test_costs.py -v
 python -m unittest tests/optim/test_optimizers.py -v
 ```
-

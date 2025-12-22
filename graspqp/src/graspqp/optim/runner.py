@@ -74,8 +74,8 @@ class OptimizationRunner:
             # Pre-step callback
             self.callbacks.on_step_start(step, state, self.problem)
 
-            # Optimizer step
-            state = self.optimizer.step(state, self.problem)
+            # Optimizer step (use self.step for consistency/extensibility)
+            state = self.step(state)
 
             # Evaluate costs for callbacks
             with torch.no_grad():

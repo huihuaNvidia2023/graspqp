@@ -35,6 +35,9 @@ class TrajectoryState:
     dt: float = 0.1
 
     # Derived attributes (set in __post_init__)
+    # The `field(init=False)` keyword is used here to indicate that these attributes
+    # (B, K, T) are NOT expected as constructor arguments, but will instead be set
+    # later—specifically, in the __post_init__ method based on the shape of input tensors.
     B: int = field(init=False)
     K: int = field(init=False)
     T: int = field(init=False)

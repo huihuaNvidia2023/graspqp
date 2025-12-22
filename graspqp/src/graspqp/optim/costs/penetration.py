@@ -59,26 +59,16 @@ class PenetrationCost(PerFrameCost):
             Per-frame costs. Shape: (B, T)
         """
         B, T, D = state.hand_states.shape
-        device = state.device
 
         # Flatten to (B*T, D) for batched FK
         flat_hand = state.flat_hand  # (B*T, D)
 
-        # Get surface points from hand model
-        ctx.hand_model.set_parameters(flat_hand)
-
+        # Get surface points using cached FK
         if self.use_capsules:
-            # Use capsule/sphere approximation (faster)
             # TODO: Implement capsule proxy
-            surface_points = ctx.hand_model.get_surface_points()
+            surface_points = ctx.get_surface_points_cached(flat_hand, n_subsample=self.n_surface_points)
         else:
-            # Use full surface points
-            surface_points = ctx.hand_model.get_surface_points()  # (B*T, n_pts, 3)
-
-        if self.n_surface_points is not None and surface_points.shape[1] > self.n_surface_points:
-            # Subsample for efficiency
-            idx = torch.randperm(surface_points.shape[1], device=device)[: self.n_surface_points]
-            surface_points = surface_points[:, idx]
+            surface_points = ctx.get_surface_points_cached(flat_hand, n_subsample=self.n_surface_points)
 
         # Compute SDF values
         # Note: Since we're using Hand_T_Object coordinates, points are already in object frame
@@ -133,8 +123,8 @@ class SelfPenetrationCost(PerFrameCost):
         # Flatten to (B*T, D) for batched computation
         flat_hand = state.flat_hand
 
-        # Set hand parameters
-        ctx.hand_model.set_parameters(flat_hand)
+        # Ensure hand model is configured (uses cache)
+        ctx.ensure_hand_configured(flat_hand)
 
         # Compute self-penetration using hand model
         if hasattr(ctx.hand_model, "self_penetration"):
