@@ -25,11 +25,25 @@ Usage:
         --n_iter 500 \
         --prior_file configs/extracted_prior.yaml \
         --w_prior 100
+
+    # With profiling and metrics output:
+    python scripts/sanity_check_optim.py \
+        --data_root_path ./objects \
+        --object_code_list apple \
+        --hand_name allegro \
+        --batch_size 16 \
+        --n_iter 500 \
+        --prior_file configs/extracted_prior.yaml \
+        --w_prior 100 \
+        --profile \
+        --output_metrics results/metrics.json
 """
 
 import argparse
+import json
 import math
 import os
+import time
 
 import numpy as np
 import roma
@@ -46,6 +60,7 @@ from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 from graspqp.metrics import GraspSpanMetricFactory
 # Import from NEW optimization framework (for state representation)
 from graspqp.optim.state import TrajectoryState
+from graspqp.utils.profiler import get_profiler
 from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
 
@@ -97,23 +112,43 @@ def parse_args():
     parser.add_argument("--n_friction_cone", default=4, type=int)
     parser.add_argument("--energy_name", default="graspqp", type=str)
 
+    # Profiling and metrics output
+    parser.add_argument("--profile", action="store_true", help="Enable detailed profiling")
+    parser.add_argument(
+        "--output_metrics",
+        default=None,
+        type=str,
+        help="Path to save metrics JSON (for testing/benchmarking)",
+    )
+    parser.add_argument(
+        "--output_dir",
+        default=None,
+        type=str,
+        help="Override output directory for grasp results (avoids overwriting existing data)",
+    )
+
     return parser.parse_args()
 
 
 def get_result_path(args, asset_id):
     """Get the result path for saving grasps (same as fit.py)."""
-    path = os.path.join(
-        args.data_root_path,
-        args.object_code_list[asset_id],
-        "grasp_predictions",
-        args.hand_name,
-        f"{args.n_contact}_contacts",
-        args.energy_name,
-    )
-    if args.grasp_type in [None, "all"]:
-        path = os.path.join(path, "default")
+    if args.output_dir:
+        # Use custom output directory (for testing, avoids overwriting existing data)
+        path = args.output_dir
     else:
-        path = os.path.join(path, args.grasp_type)
+        # Default: same structure as fit.py
+        path = os.path.join(
+            args.data_root_path,
+            args.object_code_list[asset_id],
+            "grasp_predictions",
+            args.hand_name,
+            f"{args.n_contact}_contacts",
+            args.energy_name,
+        )
+        if args.grasp_type in [None, "all"]:
+            path = os.path.join(path, "default")
+        else:
+            path = os.path.join(path, args.grasp_type)
     os.makedirs(path, exist_ok=True)
     return path
 
@@ -189,6 +224,24 @@ def export_poses(args, hand_model, energy, object_model, suffix=""):
         print(f"\033[94m==> Exported to {os.path.abspath(file_path)}\033[0m")
 
 
+def collect_energy_stats(losses, energy, weight_dict):
+    """Collect energy statistics for metrics output."""
+    stats = {}
+    for k, v in losses.items():
+        stats[k] = {
+            "mean": float(v.mean().item()),
+            "min": float(v.min().item()),
+            "max": float(v.max().item()),
+            "weight": float(weight_dict.get(k, 0.0)),
+        }
+    stats["total"] = {
+        "mean": float(energy.mean().item()),
+        "min": float(energy.min().item()),
+        "max": float(energy.max().item()),
+    }
+    return stats
+
+
 def main():
     args = parse_args()
 
@@ -199,6 +252,9 @@ def main():
     torch.manual_seed(args.seed)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    # Initialize profiler
+    profiler = get_profiler(enabled=args.profile, cuda_sync=True)
 
     num_objects = len(args.object_code_list)
     total_batch_size = num_objects * args.batch_size
@@ -213,6 +269,10 @@ def main():
     print(f"Batch size: {args.batch_size} × {num_objects} = {total_batch_size}")
     print(f"Iterations: {args.n_iter}")
     print(f"MalaStar: step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
+    if args.profile:
+        print(f"Profiling: ENABLED")
+    if args.output_metrics:
+        print(f"Metrics output: {args.output_metrics}")
     print("=" * 70)
 
     # =========================================================================
@@ -329,6 +389,9 @@ def main():
 
     energy = sum(weight_dict[k] * v for k, v in losses.items() if k in weight_dict)
 
+    # Store initial energy stats for metrics
+    initial_stats = collect_energy_stats(losses, energy, weight_dict)
+
     print(f"\nInitial energy: {energy.mean().item():.2f}")
     print(f"  Breakdown: {', '.join(f'{k}={v.mean().item():.2f}' for k, v in losses.items())}")
 
@@ -337,43 +400,60 @@ def main():
 
     print(f"\nStarting optimization...")
 
+    # Start timing
+    optimization_start_time = time.perf_counter()
+
     # =========================================================================
     # 7. Main optimization loop (same as fit.py)
     # =========================================================================
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
-        s = optimizer.try_step()
+        with profiler.section("step"):
+            with profiler.section("try_step"):
+                s = optimizer.try_step()
 
-        optimizer.zero_grad()
+            optimizer.zero_grad()
 
-        new_losses = calculate_energy(
-            hand_model,
-            object_model,
-            energy_fnc=energy_fnc,
-            energy_names=energy_names,
-            **energy_kwargs,
-        )
+            with profiler.section("energy"):
+                new_losses = calculate_energy(
+                    hand_model,
+                    object_model,
+                    energy_fnc=energy_fnc,
+                    energy_names=energy_names,
+                    profiler=profiler,
+                    **energy_kwargs,
+                )
 
-        if reference_hand is not None and weight_dict["E_prior"] > 0:
-            new_losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, reference_hand, prior_weight=1.0)
+                if reference_hand is not None and weight_dict["E_prior"] > 0:
+                    new_losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, reference_hand, prior_weight=1.0)
 
-        new_energy = sum(weight_dict[k] * v for k, v in new_losses.items() if k in weight_dict)
+                new_energy = sum(weight_dict[k] * v for k, v in new_losses.items() if k in weight_dict)
 
-        new_energy.sum().backward()
+            with profiler.section("backward"):
+                new_energy.sum().backward()
 
-        with torch.no_grad():
-            accept, t = optimizer.accept_step(energy, new_energy)
-            energy[accept] = new_energy[accept]
-            for k, v in new_losses.items():
-                if k in weight_dict:
-                    losses[k][accept] = v[accept]
+            with profiler.section("accept_step"):
+                with torch.no_grad():
+                    accept, t = optimizer.accept_step(energy, new_energy)
+                    energy[accept] = new_energy[accept]
+                    for k, v in new_losses.items():
+                        if k in weight_dict:
+                            losses[k][accept] = v[accept]
 
-        if step % 100 == 0 or step == 1:
-            breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in losses.items())
-            print(f"Step {step}: total={energy.mean().item():.2f} | {breakdown}")
+            if step % 100 == 0 or step == 1:
+                breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in losses.items())
+                print(f"Step {step}: total={energy.mean().item():.2f} | {breakdown}")
+
+        profiler.step_done()
 
     # =========================================================================
     # 8. Final results
     # =========================================================================
+    optimization_end_time = time.perf_counter()
+    total_time = optimization_end_time - optimization_start_time
+
+    # Profiling summary
+    profiler.summary()
+
     print("\n" + "=" * 70)
     print("=== Final Results ===")
     print("=" * 70)
@@ -384,6 +464,8 @@ def main():
     for k, v in losses.items():
         print(f"  {k}: mean={v.mean().item():.4f}, min={v.min().item():.4f}")
 
+    print(f"\nTiming: {total_time:.2f}s total, {total_time * 1000 / args.n_iter:.2f}ms/iter")
+
     # Export in same format as fit.py
     export_poses(args, hand_model, energy, object_model, suffix="")
 
@@ -393,6 +475,56 @@ def main():
         object_states=object_at_origin,
     )
     print(f"\nFinal TrajectoryState: B={final_state.B}, T={final_state.T}")
+
+    # =========================================================================
+    # 9. Output metrics JSON (for testing/benchmarking)
+    # =========================================================================
+    if args.output_metrics:
+        final_stats = collect_energy_stats(losses, energy, weight_dict)
+
+        # Get timing breakdown from profiler
+        timing_breakdown = {}
+        if args.profile and profiler._times:
+            total_step_time = sum(profiler._times.get("step", [0]))
+            for key, times in profiler._times.items():
+                if key != "step" and not key.startswith("step.energy."):
+                    avg_time = sum(times) / len(times) if times else 0
+                    timing_breakdown[key.replace("step.", "")] = {
+                        "total_ms": sum(times) * 1000,
+                        "avg_ms": avg_time * 1000,
+                        "pct": (sum(times) / total_step_time * 100) if total_step_time > 0 else 0,
+                    }
+
+        metrics = {
+            "config": {
+                "seed": args.seed,
+                "n_iter": args.n_iter,
+                "batch_size": args.batch_size,
+                "object": args.object_code_list[0] if len(args.object_code_list) == 1 else args.object_code_list,
+                "hand": args.hand_name,
+                "w_prior": args.w_prior,
+                "w_dis": args.w_dis,
+                "w_fc": args.w_fc,
+                "w_pen": args.w_pen,
+                "w_spen": args.w_spen,
+                "w_joints": args.w_joints,
+            },
+            "initial": initial_stats,
+            "final": final_stats,
+            "timing": {
+                "total_seconds": total_time,
+                "per_iter_ms": total_time * 1000 / args.n_iter,
+                "breakdown": timing_breakdown,
+            },
+        }
+
+        # Ensure output directory exists
+        os.makedirs(os.path.dirname(args.output_metrics) or ".", exist_ok=True)
+
+        with open(args.output_metrics, "w") as f:
+            json.dump(metrics, f, indent=2)
+        print(f"\n✓ Metrics saved to {args.output_metrics}")
+
     print("\n✓ Completed! Same results as fit.py.")
 
 

@@ -143,6 +143,63 @@ If you see `RuntimeError: Trying to backward through the graph a second time`:
 - Tensors from previous iterations are being reused without `.detach().clone()`
 - The QP solver's warm-start feature may be holding references to old tensors
 
+## Profiling & Testing
+
+### Profiling Optimization Performance
+
+Profile the optimization loop to identify bottlenecks:
+
+```bash
+python scripts/sanity_check_optim.py \
+    --data_root_path ./objects \
+    --object_code_list apple \
+    --hand_name allegro \
+    --batch_size 16 \
+    --n_iter 500 \
+    --prior_file configs/extracted_prior.yaml \
+    --w_prior 100 \
+    --profile
+```
+
+This outputs a detailed timing breakdown:
+```
+Section                               Total(s)   Mean(ms)       %
+step                                    60.02     120.04   100.0%
+energy                                  30.73      61.45    51.2%
+  └─ qp_force_closure                   15.21      30.41    25.3%
+  └─ sdf_contact                        12.09      24.18    20.1%
+backward                                15.60      31.20    26.0%
+try_step                                 7.92      15.85    13.2%
+accept_step                              5.73      11.45     9.5%
+```
+
+### System Tests
+
+Run the system test to validate correctness and detect performance regressions:
+
+```bash
+# Default: verbose mode (streams output, shows detailed comparisons)
+python -m unittest tests.system.test_sanity_check -v
+
+# Quiet mode (captures output)
+VERBOSE=0 python -m unittest tests.system.test_sanity_check -v
+```
+
+The test checks:
+- **Quality bounds**: E_dis, E_fc, E_pen, E_spen, E_prior within thresholds
+- **Regression detection**: Results within 10% of baseline
+- **Performance**: Timing within 20% of baseline
+
+### Updating the Baseline
+
+After making intentional changes that affect optimization results:
+
+```bash
+python scripts/update_baseline.py
+```
+
+This regenerates `tests/baselines/sanity_check_baseline.json` with the new expected values.
+
 ## Running Unit Tests
 
 ```bash
