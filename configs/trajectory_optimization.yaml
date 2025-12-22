@@ -1,0 +1,74 @@
+# Trajectory Optimization Configuration
+# For video trajectory post-processing
+
+problem:
+  trajectory:
+    dt: 0.1  # timestep in seconds
+
+  costs:
+    # PRIMARY: Stay close to reference (the video)
+    - type: ReferenceTrackingCost
+      name: reference_tracking
+      weight: 100.0
+      config:
+        hand_weight: 1.0
+        object_weight: 1.0
+        hand_position_weight: 10.0
+        hand_rotation_weight: 5.0
+        finger_weight: 1.0
+        use_confidence: false
+
+    # HARD CONSTRAINTS: Physical validity
+    - type: PenetrationCost
+      name: penetration
+      weight: 1000.0
+      config:
+        use_capsules: false
+
+    # SOFT CONSTRAINTS: Smoothness
+    - type: VelocitySmoothnessCost
+      name: velocity_smoothness
+      weight: 1.0
+      config:
+        component: both
+        hand_weight: 1.0
+        object_weight: 1.0
+
+    - type: AccelerationCost
+      name: acceleration
+      weight: 0.1
+      config:
+        component: both
+
+optimizer:
+  type: Adam
+  config:
+    lr: 0.01
+    betas: [0.9, 0.999]
+
+runner:
+  n_iters: 2000
+  callbacks:
+    - type: LoggingCallback
+      config:
+        log_every: 100
+        verbose: true
+    - type: CheckpointCallback
+      config:
+        save_every: 500
+        save_best: true
+    - type: EarlyStoppingCallback
+      config:
+        patience: 200
+        min_delta: 1e-5
+
+stopping:
+  conditions:
+    - type: MaxIterations
+      config:
+        max_iters: 2000
+    - type: EnergyPlateau
+      config:
+        patience: 200
+        min_delta: 1e-5
+  mode: any

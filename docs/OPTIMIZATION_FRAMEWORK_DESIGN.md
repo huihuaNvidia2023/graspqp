@@ -1,7 +1,7 @@
 # Optimization Framework Design Document
 
-> **Status**: Design Phase  
-> **Created**: 2025-01-22  
+> **Status**: Design Phase
+> **Created**: 2025-01-22
 > **Last Updated**: 2025-01-22
 
 This document captures the design discussion for refactoring GraspQP's optimization framework into a generic, modular, and GPU-efficient system.
@@ -309,7 +309,7 @@ reference_tracking:
     object_weight: 1.0     # weight for object pose error
     # Optional: per-component weights within hand
     hand_position_weight: 10.0   # wrist position
-    hand_rotation_weight: 5.0    # wrist orientation  
+    hand_rotation_weight: 5.0    # wrist orientation
     finger_weight: 1.0           # finger joints
 ```
 
@@ -348,7 +348,7 @@ costs:
       hand_rotation_weight: 5.0    # wrist orientation
       finger_weight: 1.0           # fingers can deviate more
       object_weight: 10.0          # object should match video
-  
+
   # HARD CONSTRAINTS: Physical validity
   penetration:
     weight: 1000.0                 # must not penetrate
@@ -356,7 +356,7 @@ costs:
     weight: 50.0                   # contacts should touch
   force_closure:
     weight: 10.0                   # grasp should be stable
-  
+
   # SOFT CONSTRAINTS: Smoothness
   velocity_smoothness:
     weight: 1.0                    # smooth motion
@@ -479,10 +479,10 @@ class FixedContactContext:
     def __init__(self, hand_model, contact_indices):
         # Contact indices: (B, n_contacts) - same for all T frames
         self.contact_indices = contact_indices  # computed ONCE
-        
+
         # Pre-compute contact Jacobians if needed
         self.contact_jacobians = None  # lazy compute, cache for trajectory
-    
+
     def get_contact_points(self, hand_states):
         # hand_states: (B, T, D)
         flat = hand_states.reshape(-1, D)
@@ -500,15 +500,15 @@ class PenetrationCost(PerFrameCost):
         # Process all B*T configurations in one kernel
         flat = state.hand_states.reshape(-1, D)      # (B*T, D)
         ctx.hand_model.set_parameters(flat)
-        
+
         # Batched SDF query
         surface_pts = ctx.hand_model.surface_points  # (B*T, n_pts, 3)
         sdf = ctx.object_model.cal_distance(surface_pts)[0]  # (B*T, n_pts)
-        
+
         # Penetration = negative SDF
         pen = F.relu(-sdf).sum(dim=-1)               # (B*T,)
         pen = pen.reshape(state.B, state.T)          # (B, T)
-        
+
         # Sum across time (or could be max, mean)
         return pen.sum(dim=1)                        # (B,)
 ```
@@ -520,7 +520,7 @@ class VelocitySmoothnessCost(TemporalCost):
         # Vectorized velocity: (B, T-1, D)
         vel = state.hand_states[:, 1:] - state.hand_states[:, :-1]
         vel = vel / state.dt  # actual velocity
-        
+
         # L2 norm squared, sum over time
         return (vel ** 2).sum(dim=(1, 2))  # (B,)
 
@@ -535,19 +535,19 @@ class AccelerationCost(TemporalCost):
 ```python
 class ReferenceTrackingCost(PerFrameCost):
     """Stay close to the original video trajectory"""
-    
+
     def __init__(self, reference_hand: Tensor, reference_object: Tensor, ...):
         self.ref_hand = reference_hand      # (B, T, D_hand)
         self.ref_object = reference_object  # (B, T, D_obj)
-    
+
     def evaluate(self, state: TrajectoryState, ctx) -> Tensor[B]:
         # Weighted distance to reference
         hand_error = (state.hand_states - self.ref_hand) ** 2
         obj_error = (state.object_states - self.ref_object) ** 2
-        
+
         # Could weight different components differently
         # e.g., higher weight on wrist position, lower on fingers
-        return (hand_error.sum(dim=(1, 2)) + 
+        return (hand_error.sum(dim=(1, 2)) +
                 self.object_weight * obj_error.sum(dim=(1, 2)))
 ```
 
@@ -558,11 +558,11 @@ class OptimizationContext:
     def __init__(self, ...):
         self._cache = {}
         self._contact_indices = None  # FIXED for entire trajectory
-    
+
     def set_fixed_contacts(self, contact_indices: Tensor):
         """Set once at initialization, used for all frames"""
         self._contact_indices = contact_indices  # (B, n_contacts)
-    
+
     def get_or_compute(self, key, compute_fn, scope="step"):
         """
         scope options:
@@ -642,14 +642,14 @@ problem:
   trajectory:
     n_frames: 1              # 1 = single frame (current behavior)
     dt: 0.01                 # timestep in seconds
-  
+
   costs:
     - name: contact_distance
       type: ContactDistanceCost
       weight: 100.0
       config:
         reduction: sum
-    
+
     - name: force_closure
       type: ForceClosureCost
       weight: 1.0
@@ -657,15 +657,15 @@ problem:
         friction: 0.2
         n_cone_vecs: 4
         solver: qp
-    
+
     - name: penetration
       type: PenetrationCost
       weight: 100.0
-    
+
     - name: self_penetration
       type: SelfPenetrationCost
       weight: 10.0
-    
+
     - name: velocity_smoothness
       type: VelocitySmoothnessCost
       weight: 1.0
@@ -724,7 +724,7 @@ For single-frame optimization (original grasp synthesis), output is unchanged:
     "contact_idx": Tensor(B, n_contacts),  # fixed for trajectory
     "grasp_type": str,
     "contact_links": List[str],
-    
+
     # === TRAJECTORY DATA ===
     "trajectory": {
         "n_frames": int,              # T
@@ -732,13 +732,13 @@ For single-frame optimization (original grasp synthesis), output is unchanged:
         "hand_states": Tensor(B, T, D_hand),    # optimized hand trajectory
         "object_states": Tensor(B, T, D_obj),   # optimized object trajectory
     },
-    
+
     # === REFERENCE (original video) ===
     "reference": {
         "hand_states": Tensor(B, T, D_hand),    # original from video
         "object_states": Tensor(B, T, D_obj),   # original from video
     },
-    
+
     # === DIAGNOSTICS ===
     "cost_breakdown": {
         "reference_tracking": Tensor(B,),
@@ -748,7 +748,7 @@ For single-frame optimization (original grasp synthesis), output is unchanged:
         ...
     },
     "per_frame_energy": Tensor(B, T),  # energy at each frame
-    
+
     # === METADATA ===
     "metadata": {
         "optimizer": str,
@@ -932,7 +932,7 @@ Result selection:
 ```python
 class TrajectoryState:
     """Supports both single and multi-perturbation optimization"""
-    
+
     def __init__(
         self,
         hand_states: Tensor,       # (B, T, D) or (B, K, T, D)
@@ -944,7 +944,7 @@ class TrajectoryState:
         self.object_states = object_states
         self.valid_mask = valid_mask
         self.dt = dt
-        
+
         # Detect layout
         if hand_states.dim() == 3:
             self.B, self.T, self.D_hand = hand_states.shape
@@ -953,7 +953,7 @@ class TrajectoryState:
         else:
             self.B, self.K, self.T, self.D_hand = hand_states.shape
             self._has_perturbations = True
-    
+
     @property
     def flat(self) -> "TrajectoryState":
         """Flatten (B, K, T, D) to (B*K, T, D) for computation"""
@@ -965,7 +965,7 @@ class TrajectoryState:
             valid_mask=self.valid_mask.reshape(self.B * self.K, self.T),
             dt=self.dt,
         )
-    
+
     def unflatten(self, B: int, K: int) -> "TrajectoryState":
         """Reshape (B*K, T, D) back to (B, K, T, D)"""
         return TrajectoryState(
@@ -974,7 +974,7 @@ class TrajectoryState:
             valid_mask=self.valid_mask.reshape(B, K, self.T),
             dt=self.dt,
         )
-    
+
     @staticmethod
     def from_reference(
         reference: "ReferenceTrajectory",
@@ -984,18 +984,18 @@ class TrajectoryState:
         """Create initial state with K perturbations from reference"""
         B, T, D_hand = reference.hand_states.shape
         K = n_perturbations
-        
+
         if K == 1:
             return TrajectoryState(
                 hand_states=reference.hand_states.clone(),
                 object_states=reference.object_states.clone(),
                 valid_mask=reference.valid_mask.clone(),
             )
-        
+
         # Generate K perturbations
         hand_noise = torch.randn(B, K, T, D_hand) * perturbation_scale
         obj_noise = torch.randn(B, K, T, reference.object_states.shape[-1]) * perturbation_scale
-        
+
         return TrajectoryState(
             hand_states=reference.hand_states.unsqueeze(1) + hand_noise,
             object_states=reference.object_states.unsqueeze(1) + obj_noise,
@@ -1008,7 +1008,7 @@ class TrajectoryState:
 ```python
 class ResultSelector:
     """Select best results from multi-perturbation optimization"""
-    
+
     @staticmethod
     def select_best_valid(
         state: TrajectoryState,      # (B, K, T, D)
@@ -1024,17 +1024,17 @@ class ResultSelector:
         # Mask invalid with large energy
         masked_energies = energies.clone()
         masked_energies[~valid] = float('inf')
-        
+
         # Find best per batch
         best_k = masked_energies.argmin(dim=1)  # (B,)
         success = valid.any(dim=1)               # (B,)
-        
+
         # Gather best trajectories
         B = state.B
         best_hand = state.hand_states[torch.arange(B), best_k]      # (B, T, D)
         best_object = state.object_states[torch.arange(B), best_k]  # (B, T, D)
         best_energy = energies[torch.arange(B), best_k]             # (B,)
-        
+
         return (
             TrajectoryState(best_hand, best_object, state.valid_mask[:, 0]),
             best_energy,
@@ -1055,26 +1055,26 @@ class ResultSelector:
 reference_data = {
     # Required fields - PRE-TRANSFORMED COORDINATES
     # Hand pose is RELATIVE to object (Hand_T_Object)
-    "hand_states": Tensor[B, T, D_hand],    
-    
+    "hand_states": Tensor[B, T, D_hand],
+
     # Object pose is GLOBAL (Object_T_World)
-    "object_states": Tensor[B, T, D_obj],   
-    
+    "object_states": Tensor[B, T, D_obj],
+
     "contact_indices": Tensor[B, n_contacts],  # which fingers in contact (FIXED)
-    
+
     # Hand configuration
     "hand_type": str,                        # "mano" | "allegro" | "leap" | ...
     "hand_side": str,                        # "left" | "right" (for MANO)
-    
-    # Object configuration  
+
+    # Object configuration
     "object_mesh_path": str,                 # path to simplified mesh
     "object_scale": float,                   # mesh scale factor
-    
+
     # Optional fields
     "confidence": Tensor[B, T],              # per-frame confidence from video
     "contact_links": List[str],              # which links are in contact
     "dt": float,                             # timestep (default 0.1s)
-    
+
     # Metadata
     "source_video": str,                     # source video path
     "frame_indices": Tensor[B, T],           # original frame numbers
@@ -1156,7 +1156,7 @@ contact_links = ["index_tip", "middle_tip", "ring_tip", "thumb_tip"]
 ```python
 class StoppingCondition(ABC):
     @abstractmethod
-    def should_stop(self, step: int, state: TrajectoryState, 
+    def should_stop(self, step: int, state: TrajectoryState,
                     energies: Dict[str, Tensor]) -> Tuple[bool, str]:
         """Returns (should_stop, reason)"""
         pass
@@ -1200,24 +1200,24 @@ stopping:
     - type: MaxIterations
       config:
         max_iters: 2000
-    
+
     - type: CostSuccess
       config:
         thresholds:
           penetration: 0.001
           force_closure: 0.1
           reference_tracking: 1.0
-    
+
     - type: CostFailure
       config:
         cost_name: penetration
         threshold: 0.1  # give up if penetration still > 0.1
-    
+
     - type: EnergyPlateau
       config:
         patience: 200
         min_delta: 1e-5
-  
+
   # How to combine: "any" (stop on first) or "all" (need all)
   mode: any
 ```
@@ -1256,13 +1256,13 @@ To support both MANO and robot hands:
 class MANOHandModel(HandModelInterface):
     def __init__(self, mano_model_path: str, side: str = "right"):
         self.mano = MANO(model_path=mano_model_path, is_rhand=(side == "right"))
-        
+
     def set_state(self, state: Tensor):
         # state: (B, 51) = [transl(3), global_orient(3), hand_pose(45)]
         transl = state[:, :3]
         global_orient = state[:, 3:6]
         hand_pose = state[:, 6:51]
-        
+
         output = self.mano(
             global_orient=global_orient,
             hand_pose=hand_pose,
@@ -1270,7 +1270,7 @@ class MANOHandModel(HandModelInterface):
         )
         self.vertices = output.vertices  # (B, 778, 3)
         self.joints = output.joints      # (B, 21, 3)
-    
+
     def get_contact_points(self, indices: Tensor) -> Tensor:
         # indices: (B, n_contacts) - vertex indices
         return self.vertices.gather(1, indices.unsqueeze(-1).expand(-1, -1, 3))
@@ -1345,7 +1345,7 @@ optimized_state.to_trajectory_dict("output/optimized_001.pt")
 
 **Key Optimizations Identified:**
 
-1.  **Remove QP Bottleneck**: 
+1.  **Remove QP Bottleneck**:
     - QP solver (ForceClosure) is too slow for 15k+ instances per step.
     - **Solution**: Use `GeometricStabilityCost` (SVD of Grasp Matrix + Normal alignment) as O(1) proxy in main loop. Run QP only for final validation.
 
@@ -1418,4 +1418,3 @@ optimized_state.to_trajectory_dict("output/optimized_001.pt")
 - [ ] `LBFGSOptimizer` (potentially faster convergence)
 - [ ] Confidence-weighted reference tracking
 - [ ] Trajectory visualization module
-
