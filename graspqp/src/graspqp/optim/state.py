@@ -285,10 +285,16 @@ class ReferenceTrajectory:
 
     This is the TARGET we want to stay close to while satisfying physical constraints.
 
+    Contact Model:
+        - contact_fingers: HIGH-LEVEL info specifying which FINGERS are in contact
+        - The optimizer determines which specific CONTACT POINTS on those fingers are used
+        - n_contacts: Minimum number of contact points required
+
     Attributes:
         hand_states: Hand poses relative to object from video. Shape: (B, T, D_hand)
         object_states: Object poses from video. Shape: (B, T, D_obj)
-        contact_indices: Fixed contact point indices. Shape: (B, n_contacts)
+        contact_fingers: List of finger/link names that are in contact (e.g., ["thumb", "index", "middle"])
+        n_contacts: Minimum number of contact points required per grasp
         valid_mask: Mask for valid frames. Shape: (B, T)
         confidence: Optional per-frame confidence. Shape: (B, T)
         dt: Timestep in seconds
@@ -296,19 +302,18 @@ class ReferenceTrajectory:
 
     hand_states: Tensor
     object_states: Tensor
-    contact_indices: Tensor
+    contact_fingers: Optional[List[str]] = None  # Which fingers are in contact (high-level)
+    n_contacts: int = 8  # Minimum contact points required
     valid_mask: Optional[Tensor] = None
     confidence: Optional[Tensor] = None
     dt: float = 0.1
 
     # Metadata
     hand_type: str = "allegro"
-    contact_links: Optional[List[str]] = None
 
     def __post_init__(self):
         self.B, self.T, self.D_hand = self.hand_states.shape
         self.D_obj = self.object_states.shape[-1]
-        self.n_contacts = self.contact_indices.shape[-1]
 
         if self.valid_mask is None:
             self.valid_mask = torch.ones(self.B, self.T, device=self.hand_states.device, dtype=torch.bool)
@@ -322,12 +327,12 @@ class ReferenceTrajectory:
         return ReferenceTrajectory(
             hand_states=self.hand_states.to(device),
             object_states=self.object_states.to(device),
-            contact_indices=self.contact_indices.to(device),
+            contact_fingers=self.contact_fingers,
+            n_contacts=self.n_contacts,
             valid_mask=self.valid_mask.to(device) if self.valid_mask is not None else None,
             confidence=self.confidence.to(device) if self.confidence is not None else None,
             dt=self.dt,
             hand_type=self.hand_type,
-            contact_links=self.contact_links,
         )
 
 

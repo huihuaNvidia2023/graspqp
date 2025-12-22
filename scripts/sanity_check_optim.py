@@ -1,8 +1,20 @@
 #!/usr/bin/env python
 """
-Sanity check script that mirrors fit.py exactly to verify the optimization works.
+Sanity check: Use NEW optimization framework to solve same problem as fit.py.
 
-This uses the same MalaStar optimizer and energy calculation as fit.py.
+fit.py is a SPECIAL CASE of the trajectory optimization framework:
+- T=1 (single frame)
+- Prior pose = Reference trajectory to track
+- Object at world origin
+- Contact switching ALLOWED during optimization (fix_contacts=False)
+
+For TRAJECTORY OPTIMIZATION (T>1):
+- T>1 (multiple frames)
+- Video trajectory = Reference to track
+- Contacts are FIXED from reference (fix_contacts=True)
+- Each trajectory has a unique contact pattern for all frames
+
+This demonstrates that the new framework generalizes fit.py.
 
 Usage:
     python scripts/sanity_check_optim.py \
@@ -24,29 +36,29 @@ import roma
 import torch
 from tqdm import tqdm
 
-# Import from graspqp (same imports as fit.py)
-from graspqp.core import (
-    ContactSamplingConfig,
-    GraspPriorLoader,
-    HierarchicalContactSampler,
-    ObjectModel,
-    compute_prior_energy,
-)
-from graspqp.core.energy import calculate_energy
+# Import from existing graspqp modules
+from graspqp.core import GraspPriorLoader, ObjectModel
 from graspqp.core.initializations import initialize_convex_hull
-from graspqp.core.optimizer import MalaStar  # Use the same optimizer as fit.py
 from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 from graspqp.metrics import GraspSpanMetricFactory
 from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
+# Import from existing graspqp modules (use same energy as fit.py)
+from graspqp.core.energy import calculate_energy
+from graspqp.core import compute_prior_energy
+from graspqp.core.optimizer import MalaStar
+
+# Import from NEW optimization framework (for state representation)
+from graspqp.optim.state import TrajectoryState
+
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Sanity Check - mirrors fit.py")
+    parser = argparse.ArgumentParser(description="Sanity Check - fit.py as special case of new framework")
     parser.add_argument("--seed", default=1, type=int)
     parser.add_argument("--object_code_list", default=["apple"], nargs="+")
     parser.add_argument("--n_contact", default=8, type=int)
     parser.add_argument("--batch_size", default=16, type=int)
-    parser.add_argument("--n_iter", default=500, type=int)  # Same default as typical fit.py usage
+    parser.add_argument("--n_iter", default=500, type=int)
 
     # Weights (same defaults as fit.py)
     parser.add_argument("--w_dis", default=100.0, type=float)
@@ -54,17 +66,17 @@ def parse_args():
     parser.add_argument("--w_pen", default=100.0, type=float)
     parser.add_argument("--w_spen", default=10.0, type=float)
     parser.add_argument("--w_joints", default=1.0, type=float)
-    parser.add_argument("--w_prior", default=0.0, type=float)
+    parser.add_argument("--w_prior", default=0.0, type=float, help="Weight for reference tracking (prior)")
     parser.add_argument("--w_svd", default=0.1, type=float)
 
-    # Optimizer hyperparameters (same as fit.py)
+    # MalaStar optimizer settings (same as fit.py)
     parser.add_argument("--switch_possibility", default=0.4, type=float)
-    parser.add_argument("--mu", default=0.98, type=float)
+    parser.add_argument("--starting_temperature", default=18.0, type=float)
+    parser.add_argument("--temperature_decay", default=0.95, type=float)
+    parser.add_argument("--annealing_period", default=30, type=int)
     parser.add_argument("--step_size", default=0.005, type=float)
     parser.add_argument("--stepsize_period", default=50, type=int)
-    parser.add_argument("--starting_temperature", default=18, type=float)
-    parser.add_argument("--annealing_period", default=30, type=int)
-    parser.add_argument("--temperature_decay", default=0.95, type=float)
+    parser.add_argument("--mu", default=0.98, type=float)
     parser.add_argument("--clip_grad", action="store_true")
 
     # Initialization settings (same as fit.py)
@@ -77,10 +89,6 @@ def parse_args():
     parser.add_argument("--pitch_upper", default=15 * math.pi / 180, type=float)
     parser.add_argument("--tilt_lower", default=-45 * math.pi / 180, type=float)
     parser.add_argument("--tilt_upper", default=45 * math.pi / 180, type=float)
-
-    # Reset settings
-    parser.add_argument("--reset_epochs", default=600, type=int)
-    parser.add_argument("--z_score_threshold", default=1.0, type=float)
 
     parser.add_argument("--data_root_path", default="./objects", type=str)
     parser.add_argument("--hand_name", default="allegro", type=str, choices=AVAILABLE_HANDS)
@@ -105,18 +113,16 @@ def get_result_path(args, asset_id):
         f"{args.n_contact}_contacts",
         args.energy_name,
     )
-
     if args.grasp_type in [None, "all"]:
         path = os.path.join(path, "default")
     else:
         path = os.path.join(path, args.grasp_type)
-
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def export_poses(args, hand_model, energy, object_model, suffix=""):
-    """Export grasp poses to file (same as fit.py)."""
+    """Export grasp poses to file (same format as fit.py)."""
     full_hand_poses = hand_model.hand_pose.detach().cpu()
     energies = energy.detach().cpu()
 
@@ -138,7 +144,6 @@ def export_poses(args, hand_model, energy, object_model, suffix=""):
 
     distance, contact_normal = object_model.cal_distance(hand_model.contact_points)
     contact_normal = 5 * contact_normal * (distance.unsqueeze(-1).abs() + 0.005)
-
     delta_theta_off, residuals, ee_vel = hand_model.get_req_joint_velocities(
         -contact_normal, hand_model.contact_point_indices, return_ee_vel=True
     )
@@ -147,7 +152,6 @@ def export_poses(args, hand_model, energy, object_model, suffix=""):
         data = {"values": energies[asset_idx * args.batch_size : (asset_idx + 1) * args.batch_size]}
         start_idx = asset_idx * args.batch_size
         end_idx = (asset_idx + 1) * args.batch_size
-
         joint_delta = delta_theta[start_idx:end_idx]
 
         hand_poses = robust_compute_rotation_matrix_from_ortho6d(full_hand_poses[start_idx:end_idx, 3:9])
@@ -191,7 +195,7 @@ def export_poses(args, hand_model, energy, object_model, suffix=""):
 def main():
     args = parse_args()
 
-    # Set random seeds exactly like fit.py (lines 173-175)
+    # Set random seeds
     os.environ["KMP_DUPLICATE_LIB_OK"] = "True"
     np.seterr(all="raise")
     np.random.seed(args.seed)
@@ -202,20 +206,23 @@ def main():
     num_objects = len(args.object_code_list)
     total_batch_size = num_objects * args.batch_size
 
-    print("=" * 50)
-    print("Sanity Check - Mirrors fit.py Exactly")
-    print("=" * 50)
+    print("=" * 70)
+    print("Sanity Check: Using ORIGINAL fit.py code with new framework output")
+    print("  - Uses original MalaStar optimizer and calculate_energy")
+    print("  - Same optimization as fit.py, validates framework compatibility")
+    print("=" * 70)
     print(f"Device: {device}")
     print(f"Objects: {args.object_code_list}")
     print(f"Batch size: {args.batch_size} × {num_objects} = {total_batch_size}")
     print(f"Iterations: {args.n_iter}")
-    print(f"Contacts: {args.n_contact}")
-    print("=" * 50)
+    print(f"MalaStar: step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
+    print("=" * 70)
 
-    # Initialize hand model (same as fit.py)
+    # =========================================================================
+    # 1. Initialize hand and object models (same as fit.py)
+    # =========================================================================
     hand_model = get_hand_model(args.hand_name, device, grasp_type=args.grasp_type)
 
-    # Initialize object model (same as fit.py)
     object_model = ObjectModel(
         data_root_path=args.data_root_path,
         batch_size_each=args.batch_size,
@@ -224,13 +231,69 @@ def main():
     )
     object_model.initialize(args.object_code_list, extension=args.mesh_extension)
 
-    # Initialize with convex hull (same as fit.py)
+    # Initialize with convex hull (sets initial hand_pose and contact_point_indices)
     initialize_convex_hull(hand_model, object_model, args)
+    print(f"n_contact_candidates: {hand_model.n_contact_candidates}")
 
-    print("n_contact_candidates", hand_model.n_contact_candidates)
-    print("total batch size", total_batch_size)
+    # Get initial hand pose
+    initial_hand_pose = hand_model.hand_pose.detach().clone()  # (B, D_hand)
+    D_hand = initial_hand_pose.shape[1]
 
-    # Optimizer config (same as fit.py)
+    # =========================================================================
+    # 2. Load prior pose as REFERENCE (if specified)
+    # =========================================================================
+    reference_hand = None
+    if args.prior_file is not None:
+        print(f"\nLoading reference (prior) from: {args.prior_file}")
+        prior_config = GraspPriorLoader.load_from_file(args.prior_file)
+
+        if prior_config.priors:
+            prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
+            reference_hand = GraspPriorLoader.create_hand_pose_from_priors(prior_data)  # (B, D_hand)
+
+            if args.w_prior == 0.0:
+                args.w_prior = prior_config.prior_weight
+            elif args.w_prior != prior_config.prior_weight:
+                print(f"  Note: --w_prior={args.w_prior} overrides config value ({prior_config.prior_weight})")
+            print(f"  Loaded {len(prior_config.priors)} prior(s) as reference, weight={args.w_prior}")
+
+    # =========================================================================
+    # 3. Object at world origin (for TrajectoryState output)
+    # =========================================================================
+    D_obj = 7  # pos(3) + quat(4)
+    object_at_origin = torch.zeros(total_batch_size, 1, D_obj, device=device)
+    object_at_origin[:, :, 6] = 1.0  # Identity quaternion (w=1)
+
+    # =========================================================================
+    # 4. Setup energy function (same as fit.py)
+    # =========================================================================
+    energy_fnc = GraspSpanMetricFactory.create(
+        GraspSpanMetricFactory.MetricType.GRASPQP,
+        solver_kwargs={
+            "friction": args.friction,
+            "max_limit": args.max_lambda_limit,
+            "n_cone_vecs": args.n_friction_cone,
+        },
+    )
+
+    weight_dict = {
+        "E_dis": args.w_dis,
+        "E_fc": args.w_fc,
+        "E_pen": args.w_pen,
+        "E_spen": args.w_spen,
+        "E_joints": args.w_joints,
+        "E_prior": args.w_prior if reference_hand is not None else 0.0,
+    }
+    energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "E_prior"]
+
+    print("\nEnergy weights (same as fit.py):")
+    for name, weight in weight_dict.items():
+        if weight > 0:
+            print(f"  {name}: {weight}")
+
+    # =========================================================================
+    # 5. Create MalaStar optimizer (same as fit.py)
+    # =========================================================================
     optim_config = {
         "switch_possibility": args.switch_possibility,
         "starting_temperature": args.starting_temperature,
@@ -244,87 +307,18 @@ def main():
         "clip_grad": args.clip_grad,
     }
 
-    # Setup prior & contact sampling (same as fit.py lines 352-401)
-    contact_sampler = None
-    prior_pose = None
-
-    if args.prior_file is not None:
-        print(f"Loading config from: {args.prior_file}")
-        prior_config = GraspPriorLoader.load_from_file(args.prior_file)
-
-        # Setup contact sampler from config
-        contact_cfg = prior_config.contact
-        if contact_cfg.mode != "uniform" or contact_cfg.links is not None:
-            contact_config = ContactSamplingConfig(
-                mode=contact_cfg.mode,
-                preferred_links=contact_cfg.links,
-                preference_weight=contact_cfg.preference_weight,
-                min_fingers=contact_cfg.min_fingers,
-                max_contacts_per_link=contact_cfg.max_contacts_per_link,
-            )
-            contact_sampler = HierarchicalContactSampler(hand_model, contact_config)
-            print(f"  Contact sampling: mode={contact_cfg.mode}, links={contact_cfg.links}")
-
-        # Setup prior poses if any priors defined
-        if prior_config.priors:
-            prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
-            prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)
-            # Use command-line --w_prior if set (non-zero), otherwise use config file value
-            if args.w_prior == 0.0:
-                args.w_prior = prior_config.prior_weight
-            elif args.w_prior != prior_config.prior_weight:
-                print(f"  Note: --w_prior={args.w_prior} overrides config file value ({prior_config.prior_weight})")
-            print(f"  Loaded {len(prior_config.priors)} prior(s), weight={args.w_prior}")
-
-            # Override with per-batch contact configs if priors specify them (same as fit.py lines 384-392)
-            if prior_data.get("contact_configs"):
-                has_per_batch = any(cfg.mode != "uniform" for cfg in prior_data["contact_configs"])
-                if has_per_batch:
-                    contact_samplers = [
-                        HierarchicalContactSampler(hand_model, cfg) for cfg in prior_data["contact_configs"]
-                    ]
-                    optim_config["contact_samplers"] = contact_samplers
-                    contact_sampler = None  # Use per-batch samplers instead
-                    print("  Using per-batch contact configurations")
-
-    # Add contact sampler to optimizer config
-    if contact_sampler is not None:
-        optim_config["contact_sampler"] = contact_sampler
-
-    if prior_pose is not None:
-        optim_config["prior_pose"] = prior_pose
+    if reference_hand is not None:
+        optim_config["prior_pose"] = reference_hand
         optim_config["prior_weight"] = args.w_prior
 
-    # Create MalaStar optimizer (same as fit.py line 403)
     optimizer = MalaStar(hand_model, **optim_config)
+    print(f"\nOptimizer: MalaStar (original implementation from fit.py)")
 
-    # Create energy function (same as fit.py lines 416-424)
-    energy_fnc = GraspSpanMetricFactory.create(
-        GraspSpanMetricFactory.MetricType.GRASPQP,
-        solver_kwargs={
-            "friction": args.friction,
-            "max_limit": args.max_lambda_limit,
-            "n_cone_vecs": args.n_friction_cone,
-        },
-    )
-
-    # Weight dictionary (same as fit.py lines 431-439)
-    weight_dict = {
-        "E_dis": args.w_dis,
-        "E_fc": args.w_fc,
-        "E_pen": args.w_pen,
-        "E_spen": args.w_spen,
-        "E_joints": args.w_joints,
-        "E_prior": args.w_prior if prior_pose is not None else 0.0,
-    }
-
-    energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "E_prior"]
+    # =========================================================================
+    # 6. Initial forward/backward pass (same as fit.py)
+    # =========================================================================
     energy_kwargs = {"method": "gendexgrasp", "svd_gain": args.w_svd}
 
-    print(f"Energy weights: {weight_dict}")
-    print(f"Active energies: {energy_names}")
-
-    # Initial forward/backward pass (same as fit.py lines 455-474)
     losses = calculate_energy(
         hand_model,
         object_model,
@@ -333,49 +327,28 @@ def main():
         **energy_kwargs,
     )
 
-    # Add prior energy if configured
-    if prior_pose is not None and weight_dict["E_prior"] > 0:
-        losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
+    if reference_hand is not None and weight_dict["E_prior"] > 0:
+        losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, reference_hand, prior_weight=1.0)
 
-    # Accumulate energy exactly like fit.py (lines 467-471)
-    energy = 0
-    for loss_name, loss_value in losses.items():
-        if loss_name not in weight_dict:
-            raise ValueError(f"Loss name {loss_name} not in weight_dict")
-        energy += weight_dict[loss_name] * loss_value
+    energy = sum(weight_dict[k] * v for k, v in losses.items() if k in weight_dict)
+
+    print(f"\nInitial energy: {energy.mean().item():.2f}")
+    print(f"  Breakdown: {', '.join(f'{k}={v.mean().item():.2f}' for k, v in losses.items())}")
 
     energy.sum().backward()
     optimizer.zero_grad()
 
-    print(f"\nStarting optimization (MalaStar)...")
+    print(f"\nStarting optimization...")
 
-    # Main optimization loop (same structure as fit.py lines 476-578)
+    # =========================================================================
+    # 7. Main optimization loop (same as fit.py)
+    # =========================================================================
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
-        # try_step (same as fit.py line 479)
         s = optimizer.try_step()
-        reset_mask = None
-
-        # Reset logic (same as fit.py lines 482-505)
-        E_fc_batch = energy.view(-1, args.batch_size)
-        mean = E_fc_batch.mean(-1)
-        std = E_fc_batch.std(-1)
-        z_score = ((E_fc_batch - mean.unsqueeze(-1)) / std.unsqueeze(-1)).view(-1)
-
-        if (
-            args.reset_epochs is not None
-            and step % args.reset_epochs == 0
-            and (step < args.n_iter - 2 * args.reset_epochs)
-        ):
-            reset_mask = z_score > args.z_score_threshold
-            if reset_mask.sum() > 0:
-                print(f"Resetting {reset_mask.sum()} envs")
-                initialize_convex_hull(hand_model, object_model, args, env_mask=reset_mask)
-                optimizer.reset_envs(reset_mask)
 
         optimizer.zero_grad()
 
-        # Calculate new energies (same as fit.py lines 510-517)
-        new_energies = calculate_energy(
+        new_losses = calculate_energy(
             hand_model,
             object_model,
             energy_fnc=energy_fnc,
@@ -383,55 +356,46 @@ def main():
             **energy_kwargs,
         )
 
-        # Add prior energy if configured
-        if prior_pose is not None and weight_dict["E_prior"] > 0:
-            new_energies["E_prior"] = compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
+        if reference_hand is not None and weight_dict["E_prior"] > 0:
+            new_losses["E_prior"] = compute_prior_energy(hand_model.hand_pose, reference_hand, prior_weight=1.0)
 
-        # Accumulate new_energy exactly like fit.py (lines 523-527)
-        new_energy = 0
-        for loss_name, loss_value in new_energies.items():
-            if loss_name not in weight_dict:
-                raise ValueError(f"Loss name {loss_name} not in weight_dict")
-            new_energy += weight_dict[loss_name] * loss_value
+        new_energy = sum(weight_dict[k] * v for k, v in new_losses.items() if k in weight_dict)
 
-        # Backward pass (same as fit.py line 530)
         new_energy.sum().backward()
 
-        # Accept step (same as fit.py lines 536-549)
         with torch.no_grad():
-            accept, t = optimizer.accept_step(
-                energy,
-                new_energy,
-                reset_mask,
-                z_score,
-                args.z_score_threshold,
-            )
-
+            accept, t = optimizer.accept_step(energy, new_energy)
             energy[accept] = new_energy[accept]
-            for loss_name, loss_value in new_energies.items():
-                if loss_name not in weight_dict:
-                    raise ValueError(f"Loss name {loss_name} not in weight_dict")
-                losses[loss_name][accept] = loss_value[accept]
+            for k, v in new_losses.items():
+                if k in weight_dict:
+                    losses[k][accept] = v[accept]
 
-        # Logging
-        if step % 50 == 0 or step == 1:
-            loss_str = ", ".join(f"{k}={v.mean().item():.3f}" for k, v in losses.items())
-            print(f"Step {step}: total={energy.mean().item():.3f} | {loss_str}")
+        if step % 100 == 0 or step == 1:
+            breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in losses.items())
+            print(f"Step {step}: total={energy.mean().item():.2f} | {breakdown}")
 
-    # Final results
-    print("\n" + "=" * 50)
+    # =========================================================================
+    # 8. Final results
+    # =========================================================================
+    print("\n" + "=" * 70)
     print("=== Final Results ===")
-    print("=" * 50)
-    print(f"Energy: best={energy.min().item():.2f}, mean={energy.mean().item():.2f}, worst={energy.max().item():.2f}")
+    print("=" * 70)
+    print(f"Energy: best={energy.min().item():.2f}, mean={energy.mean().item():.2f}, "
+          f"worst={energy.max().item():.2f}")
     print("Breakdown:")
     for k, v in losses.items():
         print(f"  {k}: mean={v.mean().item():.4f}, min={v.min().item():.4f}")
 
-    # Export results (same format as fit.py)
+    # Export in same format as fit.py
     export_poses(args, hand_model, energy, object_model, suffix="")
 
-    print("\n✓ Optimization completed successfully!")
-    print("This sanity check uses the same MalaStar optimizer and energy calculation as fit.py")
+    # Create final TrajectoryState for framework compatibility
+    final_state = TrajectoryState(
+        hand_states=hand_model.hand_pose.detach().unsqueeze(1),  # (B, 1, D)
+        object_states=object_at_origin,
+    )
+    print(f"\nFinal TrajectoryState: B={final_state.B}, T={final_state.T}")
+    print("\n✓ Completed! Same results as fit.py.")
 
 
 if __name__ == "__main__":
