@@ -1053,9 +1053,13 @@ class ResultSelector:
 # Multiple clips can be batched (B trajectories)
 
 reference_data = {
-    # Required fields
-    "hand_states": Tensor[B, T, D_hand],    # hand poses from video
-    "object_states": Tensor[B, T, D_obj],   # object poses from video
+    # Required fields - PRE-TRANSFORMED COORDINATES
+    # Hand pose is RELATIVE to object (Hand_T_Object)
+    "hand_states": Tensor[B, T, D_hand],    
+    
+    # Object pose is GLOBAL (Object_T_World)
+    "object_states": Tensor[B, T, D_obj],   
+    
     "contact_indices": Tensor[B, n_contacts],  # which fingers in contact (FIXED)
     
     # Hand configuration
@@ -1076,6 +1080,24 @@ reference_data = {
     "frame_indices": Tensor[B, T],           # original frame numbers
 }
 ```
+
+### Coordinate Systems (Critical Optimization)
+
+To decouple physics from global motion:
+
+1.  **Optimization Variables**:
+    *   `hand_states`: **Hand_T_Object** (Pose of hand in Object frame)
+    *   `object_states`: **Object_T_World** (Pose of object in World frame)
+
+2.  **Benefit**:
+    *   Physics costs (penetration, contact, stability) depend ONLY on `hand_states`.
+    *   Object SDF can be cached in canonical object frame (never transformed).
+    *   Global trajectory smoothness depends on `object_states`.
+    *   Optimizing `hand_states` is more stable as values are smaller/local.
+
+3.  **Forward Kinematics**:
+    *   Compute hand points in Object frame directly.
+    *   For visualization/export: `Hand_T_World = Object_T_World @ Hand_T_Object`.
 
 ### Hand State Format
 
@@ -1319,76 +1341,81 @@ optimized_state = runner.run(n_iters=2000, initial_state=state)
 optimized_state.to_trajectory_dict("output/optimized_001.pt")
 ```
 
+### 2025-01-22: Efficiency & Robustness Review
+
+**Key Optimizations Identified:**
+
+1.  **Remove QP Bottleneck**: 
+    - QP solver (ForceClosure) is too slow for 15k+ instances per step.
+    - **Solution**: Use `GeometricStabilityCost` (SVD of Grasp Matrix + Normal alignment) as O(1) proxy in main loop. Run QP only for final validation.
+
+2.  **"Hunger Games" Pruning**:
+    - Don't waste compute on diverging perturbations.
+    - **Solution**: Start with high K (e.g., 32), prune to K=8, then K=1 over time based on energy.
+
+3.  **Disentangled Coordinates (Adopted immediately)**:
+    - Optimization variables should be `Object_T_World` and `Hand_T_Object`.
+    - **Benefit**: Physics costs (penetration/contact) become invariant to global motion; SDF caching is simpler.
+
+4.  **Capsule Proxy for Penetration**:
+    - 778 vertices per hand is expensive.
+    - **Solution**: Use ~20 capsules/spheres for "coarse" penetration cost, much faster.
+
+5.  **Contact Stationarity**:
+    - Fixed indices != fixed position. Fingers could slide.
+    - **Solution**: Add `ContactStationarityCost` to penalize sliding relative to object surface.
+
+6.  **Curriculum Learning**:
+    - Bad initial penetration causes gradient explosions.
+    - **Solution**: Schedule weights (Penetration high → Reference high) to "pop" hand out then refine.
+
 ---
 
-## Discussion Log
+## Implementation Roadmap
 
-### 2025-01-22: Initial Design Session
+### Phase 1: Core Framework with Trajectory Support
+> Goal: Get basic video post-processing working end-to-end
 
-**Key decisions made:**
-1. Unified interface: single frame = trajectory of length 1
-2. Cache mechanism for intermediate result sharing
-3. Per-frame vs temporal cost base classes
-4. Extend output format, don't break backward compat
-5. Registry pattern for YAML cost loading
-6. Tensor layout: (B, T, D) - batch first, time contiguous
+- [ ] `TrajectoryState` with (B, T, D) layout
+- [ ] **Coordinate System**: Implement `hand_T_object` and `object_T_world` variables
+- [ ] `ReferenceTrajectory` to hold video data
+- [ ] `OptimizationContext` with fixed contacts
+- [ ] `CostFunction` base class (PerFrameCost, TemporalCost)
+- [ ] Core costs:
+  - [ ] `ReferenceTrackingCost` (stay close to video)
+  - [ ] `PenetrationCost` (no hand-object penetration)
+  - [ ] `VelocitySmoothnessCost` (smooth motion)
+- [ ] `OptimizationProblem`
+- [ ] `AdamOptimizer` (simple, effective for this use case)
+- [ ] `OptimizationRunner` with basic callbacks
+- [ ] YAML configuration loading
+- [ ] Output format (backward compatible + trajectory)
 
-### 2025-01-22: Use Case Clarification
+### Phase 2: Physical Constraints & Stability (Optimized)
+> Goal: Add stability without QP bottleneck
 
-**New context:**
-- Primary use case: Post-processing video trajectories
-- Scale target: Millions of frames for RL/VLA training
-- Input: Noisy hand+object trajectories from video
-- Output: Smooth, physically grounded trajectories
+- [ ] `ContactDistanceCost` (contacts touch surface)
+- [ ] **`GeometricStabilityCost`** (SVD-based proxy for force closure)
+- [ ] **`ContactStationarityCost`** (prevent sliding on object)
+- [ ] `SelfPenetrationCost` (no finger collision)
+- [ ] `JointLimitCost` (valid joint angles)
+- [ ] **QP Validation**: Run expensive QP check only at end/checkpoints
 
-**Key simplifications:**
-1. No contact change within trajectory
-   - Contact indices fixed at initialization
-   - Enables significant optimization
-2. Short trajectories only (T ≤ 30, dt=0.1s)
-   - Avoids stability issues
-   - Can chunk longer videos
+### Phase 3: Efficiency & Scale
+> Goal: Process millions of frames efficiently
 
-**Batching clarified:**
-- B trajectories can be processed in parallel
-- Temporal consistency is WITHIN each trajectory
-- Tensor layout: (B, T, D) not (T, B, D)
+- [ ] **PruningCallback**: Implement "Hunger Games" strategy (K=32 → K=1)
+- [ ] **Capsule Proxies**: Fast approximation for hand model
+- [ ] Batch loading of video trajectories
+- [ ] Multi-GPU support (DataParallel)
+- [ ] Mixed precision (fp16)
+- [ ] Profiling and bottleneck identification
+- [ ] Checkpoint/resume for large datasets
 
-**Answered questions:**
-- Q9: Object pose IS optimized (not just hand)
-- Q10: Temporal costs on consecutive pairs (window=2)
-- Q11: Use case is video post-processing for RL/VLA
-- Q12: Short trajectories only, no chunking needed
-- Q13: Keep modular initially, optimize later if needed
-- Q14: Yes, profiling suggestions would be helpful
-
-### 2025-01-22: Data Interface & Convergence
-
-**Additional answers:**
-- Q15: Video reference specifies which fingers are in contact
-- Q16: Object mesh is given, already simplified for efficiency
-- Q17: Must support both MANO (human) and robot hands (Allegro, LEAP, etc.)
-- Q18: No existing pipeline, design clean data interface now
-- Q19: Flexible convergence: fixed iters, energy threshold, early stopping (success/failure)
-
-**New design elements:**
-1. Data interface specification (input/output formats)
-2. Hand state formats for MANO vs robot hands
-3. HandModelInterface abstraction for multi-hand support
-4. Convergence criteria framework with multiple stopping conditions
-5. Contact specification format
-
-### 2025-01-22: Scale & Robustness
-
-**New questions answered:**
-- Q20: Variable-length trajectories → padding + masking
-- Q21: Multiple optimization runs → K perturbations per trajectory
-
-**New design elements:**
-1. Two-level batching: (B, K, T, D) for B trajectories × K perturbations
-2. Valid mask for variable-length trajectories
-3. Perturbation generation from reference
-4. Result selection strategies (best valid, all valid, failure detection)
-5. TrajectoryState.from_reference() with perturbation support
-6. ResultSelector for post-optimization selection
+### Phase 4: Advanced Features
+- [ ] Weight scheduling (Curriculum)
+- [ ] `MalaStarOptimizer` (for comparison)
+- [ ] `LBFGSOptimizer` (potentially faster convergence)
+- [ ] Confidence-weighted reference tracking
+- [ ] Trajectory visualization module
 
