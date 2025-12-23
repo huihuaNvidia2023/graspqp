@@ -4,7 +4,7 @@ MalaStar optimizer - reimplemented under the new optimization framework.
 MALA* (Metropolis-Adjusted Langevin Algorithm Star) from GraspQP paper.
 This is a gradient-based MCMC sampler with:
 - RMSProp-style gradient normalization
-- Temperature annealing
+- Temperature annealing with z_score adjustment
 - Metropolis-Hastings accept/reject
 - Optional contact point switching (for grasp generation mode)
 
@@ -19,8 +19,12 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import Tensor
+from torch.distributions import Normal
 
 from .base import Optimizer
+
+# Standard normal distribution for z_score -> probability conversion
+_normal = Normal(0, 1)
 
 if TYPE_CHECKING:
     from ..problem import OptimizationProblem
@@ -73,9 +77,17 @@ class MalaStarOptimizer(Optimizer):
         self,
         state: "TrajectoryState",
         problem: "OptimizationProblem",
+        z_score: Optional[Tensor] = None,
     ) -> "TrajectoryState":
         """
         Perform one MALA* optimization step.
+
+        Args:
+            state: Current trajectory state
+            problem: Optimization problem with costs
+            z_score: Optional per-batch z-score for adaptive temperature.
+                     Higher z_score (worse outlier) -> higher temperature -> more exploration.
+                     Shape: (B,). Computed as (energy - mean) / std per object batch.
 
         Flow:
         1. If first call: compute initial energy and gradient, return
@@ -103,7 +115,8 @@ class MalaStarOptimizer(Optimizer):
             self._compute_energy_and_grad(problem, hand_model)
             if self._debug:
                 print(f"\n[MalaStar Init] energy={self._current_energy.mean().item():.2f}")
-                print(f"  grad norm={hand_model.hand_pose.grad.norm().item():.4f}")
+                if hand_model.hand_pose.grad is not None:
+                    print(f"  grad norm={hand_model.hand_pose.grad.norm().item():.4f}")
             # Zero gradient like fit.py's zero_grad() before the loop
             if hand_model.hand_pose.grad is not None:
                 hand_model.hand_pose.grad.zero_()
@@ -114,17 +127,15 @@ class MalaStarOptimizer(Optimizer):
         # =====================================================================
         # 1. Try step: propose new parameters using gradient
         # =====================================================================
-        # Increment step counter first
-        self._per_batch_step += 1
-
-        # Compute step size with decay
+        # Compute step size with decay (use current step BEFORE incrementing - matches fit.py)
         s = self.step_size * (self.temperature_decay ** (self._per_batch_step // self.stepsize_period))
         step_size = s.unsqueeze(-1)  # (B, 1)
 
-        # Get gradient
+        # Get gradient (save for potential restore on reject)
         grad = hand_model.hand_pose.grad
         if grad is None:
             grad = torch.zeros_like(hand_model.hand_pose)
+        old_grad = grad.clone()  # Save for restoration on reject
 
         # Clip gradients if configured
         if self.clip_grad:
@@ -143,13 +154,18 @@ class MalaStarOptimizer(Optimizer):
         normalized_grad = grad / (torch.sqrt(self._ema_grad) + 1e-6)
 
         # Propose new hand pose
-        with torch.no_grad():
-            proposed_pose = hand_model.hand_pose.detach() - step_size * normalized_grad.detach()
+        # CRITICAL: Do NOT use .detach() on hand_pose! This preserves requires_grad
+        # so that set_parameters clones a tensor with requires_grad=True, enabling
+        # gradient flow through FK and contact computation.
+        # normalized_grad comes from .grad which doesn't have requires_grad, so
+        # subtracting it doesn't create unwanted gradient paths.
+        proposed_pose = hand_model.hand_pose - step_size * normalized_grad
 
-            # Handle NaN in proposal
+        # Handle NaN in proposal (in no_grad to avoid gradient issues)
+        with torch.no_grad():
             if proposed_pose.isnan().any():
                 nan_mask = proposed_pose.isnan().any(dim=-1)
-                proposed_pose[nan_mask] = hand_model.hand_pose[nan_mask].detach()
+                proposed_pose[nan_mask] = hand_model.hand_pose[nan_mask]
 
         # =====================================================================
         # 2. Sample new contact indices (if not fixed)
@@ -160,18 +176,29 @@ class MalaStarOptimizer(Optimizer):
             new_contact_indices = self._sample_contacts(hand_model, problem.context, device)
 
         # =====================================================================
-        # 3. Save old state (pose, contacts, contact_points, energy)
+        # 3. Save old state (pose, contacts, contact_points, energy, grad)
         # =====================================================================
         old_hand_pose = hand_model.hand_pose.detach().clone()
         old_contact_indices = hand_model.contact_point_indices.clone()
         old_contact_points = hand_model.contact_points.clone()
+        old_global_translation = hand_model.global_translation.clone()
+        old_global_rotation = hand_model.global_rotation.clone()
         old_energy = self._current_energy.clone()
 
         # =====================================================================
         # 4. Set new parameters and compute new energy
         # =====================================================================
         # Use set_parameters which creates a fresh tensor (like fit.py)
+        # Since proposed_pose has requires_grad=True, the clone in set_parameters
+        # also has requires_grad=True, so FK/contact computation builds gradient graph
         hand_model.set_parameters(proposed_pose, new_contact_indices)
+
+        # Increment step counter AFTER set_parameters (matches fit.py try_step)
+        self._per_batch_step += 1
+
+        # Zero grad before computing new energy (like fit.py's zero_grad before calculate_energy)
+        if hand_model.hand_pose.grad is not None:
+            hand_model.hand_pose.grad.zero_()
 
         # Compute new energy and gradient (creates fresh graph)
         new_energy = self._compute_energy_and_grad(problem, hand_model)
@@ -183,6 +210,12 @@ class MalaStarOptimizer(Optimizer):
             self.temperature_decay ** (self._per_batch_step // self.annealing_period)
         )
 
+        # z_score-based temperature adjustment (like fit.py)
+        # Higher z_score (worse energy relative to batch) -> higher temperature -> more exploration
+        if z_score is not None:
+            proba = _normal.cdf(z_score.detach())  # Convert z_score to probability [0, 1]
+            temperature = temperature * (1 + proba)  # Scale temperature by (1 + proba)
+
         with torch.no_grad():
             alpha = torch.rand(B, dtype=torch.float, device=device)
             accept = alpha < torch.exp((old_energy - new_energy) / temperature)
@@ -193,21 +226,25 @@ class MalaStarOptimizer(Optimizer):
                 print(f"  old_energy={old_energy.mean().item():.2f}, new_energy={new_energy.mean().item():.2f}")
                 print(f"  temperature={temperature.mean().item():.4f}, accept_rate={accept.float().mean().item():.2f}")
                 print(f"  step_size={s.mean().item():.6f}, EMA={self._ema_grad.mean().item():.6f}")
-                print(f"  grad norm (before)={grad.norm().item():.4f}")
+                print(f"  grad norm (before)={old_grad.norm().item():.4f}")
                 if hand_model.hand_pose.grad is not None:
                     new_grad = hand_model.hand_pose.grad
                     print(f"  grad norm (after)={new_grad.norm().item():.4f}")
                     print(f"  grad trans={new_grad[:,:3].norm().item():.2f}, rot={new_grad[:,3:9].norm().item():.2f}, joints={new_grad[:,9:].norm().item():.2f}")
                 print(f"  hand_pose change={((hand_model.hand_pose - old_hand_pose)**2).sum(-1).sqrt().mean().item():.6f}")
 
-            # Restore rejected states (pose, contacts, contact_points, energy)
-            # NOTE: Do NOT restore gradients! fit.py keeps gradients from proposed state
-            # for ALL samples (accepted and rejected). This is key for proper convergence.
+            # Restore rejected states (pose, contacts, contact_points, global transforms, energy, gradient)
+            # CRITICAL: Also restore gradient for rejected samples, matching fit.py behavior
             if reject.any():
                 hand_model.hand_pose[reject] = old_hand_pose[reject]
                 hand_model.contact_point_indices[reject] = old_contact_indices[reject]
                 hand_model.contact_points[reject] = old_contact_points[reject]
+                hand_model.global_translation[reject] = old_global_translation[reject]
+                hand_model.global_rotation[reject] = old_global_rotation[reject]
                 self._current_energy[reject] = old_energy[reject]
+                # Restore old gradient for rejected samples (key for proper convergence!)
+                if hand_model.hand_pose.grad is not None:
+                    hand_model.hand_pose.grad[reject] = old_grad[reject]
 
             # Recompute FK for consistency
             hand_model.current_status = hand_model.fk(hand_model.hand_pose[:, 9:])

@@ -126,7 +126,14 @@ def parse_args():
         type=str,
         choices=["convex_hull", "prior"],
         help="Initialization mode: 'convex_hull' for random grasp generation (matches fit.py), "
-        "'prior' for trajectory refinement (all batches start from prior pose)",
+        "'prior' for trajectory refinement (start from prior with controlled jitter)",
+    )
+    parser.add_argument(
+        "--init_jitter",
+        default=None,
+        type=float,
+        help="Jitter scale for prior init mode (default: use config values for convex_hull, 0.1 for prior). "
+        "Set to 0 for no jitter, or small values like 0.05-0.2 for exploration.",
     )
 
     # Profiling and metrics output
@@ -314,7 +321,14 @@ def main():
     object_model.initialize(args.object_code_list, extension=args.mesh_extension)
 
     # =========================================================================
-    # 2. Load prior pose (if specified)
+    # 2. Initialize hand pose with convex_hull (MUST be before prior loading
+    #    to match fit.py's random state consumption order!)
+    # =========================================================================
+    print(f"\nInitialization: convex_hull sampling (random grasp generation)")
+    initialize_convex_hull(hand_model, object_model, args)
+
+    # =========================================================================
+    # 3. Load prior pose (if specified) - AFTER convex_hull init to match fit.py
     # =========================================================================
     prior_pose = None
     prior_config = None
@@ -323,12 +337,20 @@ def main():
         prior_config = GraspPriorLoader.load_from_file(args.prior_file)
 
         if prior_config.priors:
-            # For trajectory refinement: disable jitter to keep all batches identical
-            if args.init_mode == "prior":
-                print(f"  Mode: trajectory refinement (init from prior, no jitter)")
-                prior_config.jitter_translation = 0.0
-                prior_config.jitter_rotation = 0.0
-                prior_config.jitter_joints = 0.0
+            # Apply jitter settings based on mode and --init_jitter
+            if args.init_jitter is not None:
+                # Explicit jitter override
+                jitter_scale = args.init_jitter
+                prior_config.jitter_translation = 0.02 * jitter_scale  # ~2cm at scale 1.0
+                prior_config.jitter_rotation = 0.1 * jitter_scale  # ~0.1 rad at scale 1.0
+                prior_config.jitter_joints = 0.1 * jitter_scale
+                print(f"  Jitter scale: {jitter_scale} (trans={prior_config.jitter_translation:.3f}, "
+                      f"rot={prior_config.jitter_rotation:.3f}, joints={prior_config.jitter_joints:.3f})")
+            elif args.init_mode == "prior":
+                # Default for prior mode: moderate jitter for exploration
+                jitter_scale = 1.0  # Use config defaults which are reasonable
+                print(f"  Mode: trajectory refinement (init from prior with config jitter)")
+            # else: convex_hull mode uses config defaults
 
             prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
             prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)  # (B, D_hand)
@@ -340,22 +362,17 @@ def main():
             print(f"  Loaded {len(prior_config.priors)} prior(s), weight={args.w_prior}")
 
     # =========================================================================
-    # 3. Initialize hand pose based on mode
+    # 4. Override hand pose if using prior init mode
     # =========================================================================
-    if args.init_mode == "convex_hull":
-        # Grasp generation mode: random init (matches fit.py)
-        print(f"\nInitialization mode: convex_hull (random grasp generation)")
-        initialize_convex_hull(hand_model, object_model, args)
-    elif args.init_mode == "prior":
-        # Trajectory refinement mode: init from prior
+    if args.init_mode == "prior":
+        # Trajectory refinement mode: override with prior pose
         if prior_pose is None:
             raise ValueError("--init_mode=prior requires --prior_file to be specified")
-        print(f"\nInitialization mode: prior (trajectory refinement)")
-        # Initialize contacts first (need valid contact candidates)
-        initialize_convex_hull(hand_model, object_model, args)
-        # Then override hand_pose with prior
+        print(f"\nInit mode: prior (trajectory refinement) - overriding convex_hull init")
         hand_model.set_parameters(prior_pose, hand_model.contact_point_indices)
         print(f"  All {total_batch_size} batches initialized to same prior pose")
+    else:
+        print(f"\nInit mode: convex_hull (using random initialization)")
 
     print(f"n_contact_candidates: {hand_model.n_contact_candidates}")
 
@@ -607,6 +624,10 @@ def main():
     # Start timing
     optimization_start_time = time.perf_counter()
 
+    # Track current energy for z_score computation (like fit.py)
+    # The optimizer internally tracks this, but we need it for z_score
+    current_energy = initial_energy.clone()
+
     # =========================================================================
     # 9. Main optimization loop
     # =========================================================================
@@ -615,9 +636,21 @@ def main():
             # Clear step cache
             context.clear_step_cache()
 
+            # Compute z_score for temperature adjustment (like fit.py)
+            # z_score measures how "bad" each batch is relative to the mean/std
+            # Higher z_score -> higher temperature -> more exploration for stuck batches
+            energy_batch = current_energy.view(-1, args.batch_size)  # (num_objects, batch_size)
+            mean_energy = energy_batch.mean(-1, keepdim=True)  # (num_objects, 1)
+            std_energy = energy_batch.std(-1, keepdim=True).clamp(min=1e-6)  # (num_objects, 1)
+            z_score = ((energy_batch - mean_energy) / std_energy).view(-1)  # (B,)
+
             # Optimizer step (handles gradient, accept/reject, contact sampling)
             with profiler.section("optimizer_step"):
-                state = optimizer.step(state, problem)
+                state = optimizer.step(state, problem, z_score=z_score)
+
+            # Update current energy from optimizer's internal state
+            if optimizer._current_energy is not None:
+                current_energy = optimizer._current_energy.clone()
 
             # Get current energy for logging
             if step % 100 == 0 or step == 1:
@@ -630,9 +663,9 @@ def main():
                     )
 
                     current_costs = problem.evaluate_all(state)
-                    current_energy = problem.total_energy(state)
+                    log_energy = problem.total_energy(state)
                     breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in current_costs.items())
-                    print(f"Step {step}: total={current_energy.mean().item():.2f} | {breakdown}")
+                    print(f"Step {step}: total={log_energy.mean().item():.2f} | {breakdown}")
 
                     # Restore gradient
                     if saved_grad is not None:
