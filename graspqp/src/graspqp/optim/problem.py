@@ -91,7 +91,7 @@ class OptimizationProblem:
 
         for cost in self.costs.values():
             if cost.enabled:
-                with self._profile_section(f"cost.{cost.name}"):
+                with self._profile_section(f"costs.{cost.name}"):
                     energy = cost(state, self.context)
                 total = total + energy
 

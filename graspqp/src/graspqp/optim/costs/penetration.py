@@ -69,7 +69,6 @@ class PenetrationCost(PerFrameCost):
             Per-frame costs. Shape: (B, T)
         """
         B, T, D = state.hand_states.shape
-        device = state.device
 
         # Ensure hand model is configured
         flat_hand = state.flat_hand  # (B*T, D)
@@ -82,7 +81,8 @@ class PenetrationCost(PerFrameCost):
 
         # Compute HAND's SDF at object surface points
         # hand_model.cal_distance: interior is positive, exterior is negative
-        distances = ctx.hand_model.cal_distance(object_surface_points)  # (B*T, n_samples)
+        with ctx._profile_section("sdf_penetration"):
+            distances = ctx.hand_model.cal_distance(object_surface_points)  # (B*T, n_samples)
 
         # Penalize positive values (object points inside hand)
         distances = distances.clone()

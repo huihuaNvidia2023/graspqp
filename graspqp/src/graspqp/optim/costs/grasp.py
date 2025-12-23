@@ -142,15 +142,16 @@ class ForceClosureCost(PerFrameCost):
         # Get SDF distance and normals (CACHED - expensive operation!)
         distance, contact_normal = ctx.get_contact_sdf_cached(flat_hand)
 
-        # Compute force closure energy
-        E_fc, _ = self._energy_fnc(
-            contact_pts=contact_points,
-            contact_normals=contact_normal,
-            sdf=distance,
-            cog=ctx.object_model.cog,
-            with_solution=True,
-            svd_gain=self.svd_gain,
-        )
+        # Compute force closure energy (QP solver - expensive!)
+        with ctx._profile_section("qp_solver"):
+            E_fc, _ = self._energy_fnc(
+                contact_pts=contact_points,
+                contact_normals=contact_normal,
+                sdf=distance,
+                cog=ctx.object_model.cog,
+                with_solution=True,
+                svd_gain=self.svd_gain,
+            )
 
         # Reshape to (B, T)
         return E_fc.reshape(B, T)
@@ -247,10 +248,9 @@ class PriorPoseCost(PerFrameCost):
         from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
         B, T, D = state.hand_states.shape
-        device = state.device
 
         if self._prior_pose is None:
-            return torch.zeros(B, T, device=device)
+            return torch.zeros(B, T, device=state.device)
 
         # Flatten to (B*T, D)
         flat_hand = state.flat_hand

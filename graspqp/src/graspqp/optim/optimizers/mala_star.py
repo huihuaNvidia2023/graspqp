@@ -155,14 +155,15 @@ class MalaStarOptimizer(Optimizer):
         # Then the first loop iteration uses zero grad for proposal
         # =====================================================================
         if not self._initialized:
-            self._compute_energy_and_grad(problem, hand_model)
-            if self._debug:
-                print(f"\n[MalaStar Init] energy={self._current_energy.mean().item():.2f}")
+            with self._profile_section("init"):
+                self._compute_energy_and_grad(problem, hand_model)
+                if self._debug:
+                    print(f"\n[MalaStar Init] energy={self._current_energy.mean().item():.2f}")
+                    if hand_model.hand_pose.grad is not None:
+                        print(f"  grad norm={hand_model.hand_pose.grad.norm().item():.4f}")
+                # Zero gradient like fit.py's zero_grad() before the loop
                 if hand_model.hand_pose.grad is not None:
-                    print(f"  grad norm={hand_model.hand_pose.grad.norm().item():.4f}")
-            # Zero gradient like fit.py's zero_grad() before the loop
-            if hand_model.hand_pose.grad is not None:
-                hand_model.hand_pose.grad.zero_()
+                    hand_model.hand_pose.grad.zero_()
             self._initialized = True
             # DON'T return early - continue to do the full step with zero gradient
             # This matches fit.py where first iteration still resamples contacts
@@ -357,8 +358,8 @@ class MalaStarOptimizer(Optimizer):
                 self._cached_state.hand_states = hand_states
 
             # Compute energy using costs (they access hand_model properties)
-            with self._profile_section("costs"):
-                energy = problem.total_energy(self._cached_state)  # (B,)
+            # Note: individual cost profiling is done in problem.total_energy
+            energy = problem.total_energy(self._cached_state)  # (B,)
 
             # Store for accept/reject
             self._current_energy = energy.detach().clone()

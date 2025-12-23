@@ -42,7 +42,7 @@ def main():
         "--hand_name",
         "allegro",
         "--batch_size",
-        "32",
+        "16",
         "--n_iter",
         "500",
         "--prior_file",

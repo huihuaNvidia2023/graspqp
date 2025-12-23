@@ -422,6 +422,7 @@ def main():
         object_model=object_model,
         reference=reference,
         device=device,
+        profiler=profiler,
     )
 
     # =========================================================================

@@ -45,15 +45,20 @@ class OptimizationContext:
         reference: Optional["ReferenceTrajectory"] = None,
         contact_sampler: Any = None,  # HierarchicalContactSampler
         device: Optional[torch.device] = None,
+        profiler: Any = None,  # StepProfiler for timing expensive operations
     ):
         self.hand_model = hand_model
         self.object_model = object_model
         self.reference = reference
         self.device = device or torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.profiler = profiler
 
         # Cache for intermediate results
+        # Uses generation counter for step-scoped entries to avoid delete/recreate overhead
         self._cache: Dict[str, Any] = {}
         self._cache_scopes: Dict[str, str] = {}  # key -> scope
+        self._cache_generations: Dict[str, int] = {}  # key -> generation when set
+        self._step_generation: int = 0  # Incremented each step
 
         # Contact sampling
         self._contact_sampler = contact_sampler
@@ -70,6 +75,14 @@ class OptimizationContext:
         # Flag to skip set_parameters (for gradient computation mode)
         # When True, costs should assume hand_model is already configured
         self._skip_set_parameters: bool = False
+
+    def _profile_section(self, name: str):
+        """Context manager for profiling a section."""
+        from contextlib import nullcontext
+
+        if self.profiler is not None:
+            return self.profiler.section(name)
+        return nullcontext()
 
     @property
     def contact_fingers(self) -> Optional[List[str]]:
@@ -126,8 +139,22 @@ class OptimizationContext:
             return None
 
     def get_cached(self, key: str) -> Optional[Any]:
-        """Get a cached value if it exists."""
-        return self._cache.get(key)
+        """
+        Get a cached value if it exists and is valid.
+
+        For step-scoped entries, checks if the generation matches.
+        """
+        if key not in self._cache:
+            return None
+
+        scope = self._cache_scopes.get(key, "step")
+        if scope == "step":
+            # Check generation - return None if stale
+            cached_gen = self._cache_generations.get(key, -1)
+            if cached_gen != self._step_generation:
+                return None
+
+        return self._cache[key]
 
     def set_cached(self, key: str, value: Any, scope: str = "step"):
         """
@@ -136,12 +163,14 @@ class OptimizationContext:
         Args:
             key: Cache key
             value: Value to cache
-            scope: Cache scope - "step" (cleared each step),
+            scope: Cache scope - "step" (invalidated each step),
                    "trajectory" (valid for entire optimization),
                    "persistent" (never cleared)
         """
         self._cache[key] = value
         self._cache_scopes[key] = scope
+        if scope == "step":
+            self._cache_generations[key] = self._step_generation
 
     def get_or_compute(
         self,
@@ -160,25 +189,30 @@ class OptimizationContext:
         Returns:
             Cached or computed value
         """
-        if key in self._cache:
-            return self._cache[key]
+        cached = self.get_cached(key)
+        if cached is not None:
+            return cached
 
         value = compute_fn()
-        self._cache[key] = value
-        self._cache_scopes[key] = scope
+        self.set_cached(key, value, scope)
         return value
 
     def clear_step_cache(self):
-        """Clear cache entries with scope='step'. Called at start of each optimization step."""
-        keys_to_remove = [key for key, scope in self._cache_scopes.items() if scope == "step"]
-        for key in keys_to_remove:
-            del self._cache[key]
-            del self._cache_scopes[key]
+        """
+        Invalidate step-scoped cache entries.
+
+        Called at start of each optimization step.
+        Uses generation counter - no actual deletion, entries are
+        just considered stale and will be overwritten on next set.
+        """
+        self._step_generation += 1
 
     def clear_all_cache(self):
         """Clear entire cache."""
         self._cache.clear()
         self._cache_scopes.clear()
+        self._cache_generations.clear()
+        self._step_generation = 0
 
     def get_contact_points(self, hand_states: Tensor) -> Tensor:
         """
@@ -249,27 +283,31 @@ class OptimizationContext:
             flat_hand: Flattened hand states, shape (N, D_hand)
         """
         cache_key = "_hand_configured_ptr"
+        # Retrieve the previously cached data pointer (an integer uniquely identifying the memory address of a tensor's data).
         cached_ptr = self.get_cached(cache_key)
 
-        # Fast identity check using data pointer
+        # Obtain the current flat_hand tensor's data pointer (also an integer).
+        # This allows for a very fast check: if the pointer is unchanged,
+        # the hand state in memory is identical (no need to recompute FK, etc.).
         current_ptr = flat_hand.data_ptr()
 
         if cached_ptr != current_ptr:
-            if self._skip_set_parameters:
-                # In gradient mode: update translation, rotation, and FK
-                # without calling set_parameters (which clones the tensor).
-                # This preserves gradient flow through hand_pose.
-                from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
+            with self._profile_section("fk"):
+                if self._skip_set_parameters:
+                    # In gradient mode: update translation, rotation, and FK
+                    # without calling set_parameters (which clones the tensor).
+                    # This preserves gradient flow through hand_pose.
+                    from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
-                self.hand_model.global_translation = flat_hand[:, :3]
-                self.hand_model.global_rotation = robust_compute_rotation_matrix_from_ortho6d(flat_hand[:, 3:9])
-                self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
-            else:
-                # Normal mode: full set_parameters
-                if self._current_contact_indices is not None:
-                    self.hand_model.set_parameters(flat_hand, contact_point_indices=self._current_contact_indices)
+                    self.hand_model.global_translation = flat_hand[:, :3]
+                    self.hand_model.global_rotation = robust_compute_rotation_matrix_from_ortho6d(flat_hand[:, 3:9])
+                    self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
                 else:
-                    self.hand_model.set_parameters(flat_hand)
+                    # Normal mode: full set_parameters
+                    if self._current_contact_indices is not None:
+                        self.hand_model.set_parameters(flat_hand, contact_point_indices=self._current_contact_indices)
+                    else:
+                        self.hand_model.set_parameters(flat_hand)
             self.set_cached(cache_key, current_ptr, scope="step")
 
     def get_contact_points_cached(self, flat_hand: Tensor) -> Tensor:
@@ -341,7 +379,8 @@ class OptimizationContext:
         contact_points = self.get_contact_points_cached(flat_hand)
 
         # Compute SDF (expensive!)
-        distance, contact_normal = self.object_model.cal_distance(contact_points)
+        with self._profile_section("sdf_contact"):
+            distance, contact_normal = self.object_model.cal_distance(contact_points)
 
         # Cache the result
         self.set_cached(cache_key, (distance, contact_normal), scope="step")
