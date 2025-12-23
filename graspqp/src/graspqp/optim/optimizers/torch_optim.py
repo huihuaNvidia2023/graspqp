@@ -19,13 +19,17 @@ if TYPE_CHECKING:
 
 class AdamOptimizer(Optimizer):
     """
-    Adam optimizer wrapper.
+    Adam optimizer wrapper with persistent momentum.
+
+    IMPORTANT: This optimizer maintains internal state across steps.
+    Call initialize() before the optimization loop to set up persistent parameters.
 
     Config options:
         lr: Learning rate (default: 0.01)
         betas: Adam betas (default: (0.9, 0.999))
         eps: Epsilon for numerical stability (default: 1e-8)
         weight_decay: L2 regularization (default: 0)
+        debug: Enable debug output (default: False)
     """
 
     def __init__(
@@ -34,6 +38,7 @@ class AdamOptimizer(Optimizer):
         betas: tuple = (0.9, 0.999),
         eps: float = 1e-8,
         weight_decay: float = 0,
+        debug: bool = False,
         config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(config)
@@ -41,18 +46,45 @@ class AdamOptimizer(Optimizer):
         self.betas = betas
         self.eps = eps
         self.weight_decay = weight_decay
+        self.debug = debug
 
-    def _ensure_optimizer(self, params: List[Tensor]) -> Adam:
-        """Create or update internal Adam optimizer."""
-        # Always create new optimizer since params are new tensors each step
+        # Persistent parameters (set by initialize())
+        self._hand_param: Optional[Tensor] = None
+        self._object_param: Optional[Tensor] = None
+        self._internal_optimizer: Optional[Adam] = None
+
+    def initialize(self, state: "TrajectoryState") -> "TrajectoryState":
+        """
+        Initialize persistent parameters from initial state.
+        Must be called before the first step().
+
+        Returns:
+            The state with parameters set to the internal persistent tensors.
+        """
+        # Create persistent parameter tensors
+        self._hand_param = state.hand_states.detach().clone().requires_grad_(True)
+        self._object_param = state.object_states.detach().clone().requires_grad_(True)
+
+        # Create the Adam optimizer ONCE
         self._internal_optimizer = Adam(
-            params,
+            [self._hand_param, self._object_param],
             lr=self.lr,
             betas=self.betas,
             eps=self.eps,
             weight_decay=self.weight_decay,
         )
-        return self._internal_optimizer
+
+        if self.debug:
+            print(
+                f"[AdamOptimizer] Initialized with hand_param shape={self._hand_param.shape}, "
+                f"object_param shape={self._object_param.shape}"
+            )
+
+        # Return state pointing to persistent params
+        new_state = state.clone()
+        new_state.hand_states = self._hand_param
+        new_state.object_states = self._object_param
+        return new_state
 
     def step(
         self,
@@ -60,38 +92,147 @@ class AdamOptimizer(Optimizer):
         problem: "OptimizationProblem",
     ) -> "TrajectoryState":
         """Perform one Adam optimization step."""
-        # Ensure state requires grad
+        # If not initialized, do it now (fallback behavior)
+        if self._internal_optimizer is None:
+            return self._step_create_new(state, problem)
+
+        # Use persistent parameters
+        optimizer = self._internal_optimizer
+
+        # Zero gradients
+        optimizer.zero_grad()
+
+        # Clear step cache so FK is recomputed with updated params
+        problem.context.clear_step_cache()
+
+        # Create state wrapper pointing to persistent params
+        current_state = state.clone()
+        current_state.hand_states = self._hand_param
+        current_state.object_states = self._object_param
+
+        # CRITICAL: Enable gradient mode in context
+        # This prevents set_parameters from cloning tensors, preserving gradient flow
+        problem.context._skip_set_parameters = True
+
+        try:
+            # Compute total energy
+            energy = problem.total_energy(current_state)
+            total = energy.sum()
+
+            # Backward pass
+            total.backward()
+        finally:
+            # Restore normal mode
+            problem.context._skip_set_parameters = False
+
+        if self.debug and self._step_count % 10 == 0:
+            hand_grad = self._hand_param.grad
+            if hand_grad is not None:
+                grad_norm = hand_grad.norm().item()
+                grad_mean = hand_grad.abs().mean().item()
+                grad_max = hand_grad.abs().max().item()
+                print(
+                    f"[AdamOptimizer] Step {self._step_count}: "
+                    f"energy={total.item():.4f}, "
+                    f"grad_norm={grad_norm:.6f}, "
+                    f"grad_mean={grad_mean:.6f}, "
+                    f"grad_max={grad_max:.6f}"
+                )
+
+                # Check for zero gradients
+                if grad_norm < 1e-8:
+                    print(f"  WARNING: Near-zero gradient! Optimization may be stuck.")
+            else:
+                print(f"[AdamOptimizer] Step {self._step_count}: NO GRADIENT!")
+
+        # Optimizer step (updates self._hand_param and self._object_param in-place)
+        optimizer.step()
+
+        self._step_count += 1
+
+        # Return state pointing to updated persistent params
+        result_state = state.clone()
+        result_state.hand_states = self._hand_param.detach().clone().requires_grad_(True)
+        result_state.object_states = self._object_param.detach().clone().requires_grad_(True)
+
+        # Update persistent params to the new values (for next step)
+        self._hand_param = result_state.hand_states
+        self._object_param = result_state.object_states
+
+        # Re-create optimizer with new tensors but copy momentum state
+        old_state = optimizer.state_dict()
+        self._internal_optimizer = Adam(
+            [self._hand_param, self._object_param],
+            lr=self.lr,
+            betas=self.betas,
+            eps=self.eps,
+            weight_decay=self.weight_decay,
+        )
+        # Copy momentum state
+        if len(old_state["state"]) > 0:
+            new_state_dict = self._internal_optimizer.state_dict()
+            # Map old param ids to new ones
+            for i, (old_key, old_val) in enumerate(old_state["state"].items()):
+                new_key = list(new_state_dict["param_groups"][0]["params"])[i]
+                new_state_dict["state"][new_key] = {
+                    "step": old_val["step"],
+                    "exp_avg": old_val["exp_avg"].clone(),
+                    "exp_avg_sq": old_val["exp_avg_sq"].clone(),
+                }
+            self._internal_optimizer.load_state_dict(new_state_dict)
+
+        return result_state
+
+    def _step_create_new(
+        self,
+        state: "TrajectoryState",
+        problem: "OptimizationProblem",
+    ) -> "TrajectoryState":
+        """Fallback: create new optimizer each step (original behavior, loses momentum)."""
         state = state.clone()
         state.hand_states.requires_grad_(True)
         state.object_states.requires_grad_(True)
 
         params = [state.hand_states, state.object_states]
-        optimizer = self._ensure_optimizer(params)
+        optimizer = Adam(
+            params,
+            lr=self.lr,
+            betas=self.betas,
+            eps=self.eps,
+            weight_decay=self.weight_decay,
+        )
 
-        # Zero gradients
         optimizer.zero_grad()
-
-        # Clear step cache
         problem.context.clear_step_cache()
 
-        # Compute total energy
-        energy = problem.total_energy(state)
-        total = energy.sum()
+        # CRITICAL: Enable gradient mode
+        problem.context._skip_set_parameters = True
+        try:
+            energy = problem.total_energy(state)
+            total = energy.sum()
+            total.backward()
+        finally:
+            problem.context._skip_set_parameters = False
 
-        # Backward pass
-        total.backward()
+        if self.debug:
+            hand_grad = state.hand_states.grad
+            if hand_grad is not None:
+                print(
+                    f"[AdamOptimizer] Step {self._step_count} (no init): "
+                    f"energy={total.item():.4f}, grad_norm={hand_grad.norm().item():.6f}"
+                )
 
-        # Optimizer step
         optimizer.step()
-
         self._step_count += 1
 
-        # Return updated state (detached)
         return state.detach()
 
     def reset(self):
         """Reset optimizer state."""
         super().reset()
+        self._hand_param = None
+        self._object_param = None
+        self._internal_optimizer = None
 
     def get_diagnostics(self) -> Dict[str, Any]:
         """Get diagnostic information."""
@@ -100,6 +241,7 @@ class AdamOptimizer(Optimizer):
             {
                 "lr": self.lr,
                 "betas": self.betas,
+                "initialized": self._internal_optimizer is not None,
             }
         )
         return diag

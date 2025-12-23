@@ -47,6 +47,7 @@ from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
 from graspqp.optim.costs.reference import ReferenceTrackingCost
 from graspqp.optim.costs.temporal import VelocitySmoothnessCost
 from graspqp.optim.optimizers.mala_star_trajectory import MalaStarTrajectoryOptimizer
+from graspqp.optim.optimizers.torch_optim import AdamOptimizer
 from graspqp.optim.problem import OptimizationProblem
 from graspqp.optim.state import ReferenceTrajectory, TrajectoryState
 from graspqp.utils.profiler import get_profiler
@@ -79,6 +80,15 @@ def parse_args():
     parser.add_argument("--w_svd", default=0.1, type=float)
 
     # Optimizer settings
+    parser.add_argument(
+        "--optimizer",
+        default="adam",
+        type=str,
+        choices=["adam", "mala"],
+        help="Optimizer: 'adam' for refinement (recommended), 'mala' for exploration",
+    )
+    parser.add_argument("--lr", default=0.005, type=float, help="Learning rate for Adam")
+    # MALA* settings (only used if --optimizer mala)
     parser.add_argument("--starting_temperature", default=18.0, type=float)
     parser.add_argument("--temperature_decay", default=0.95, type=float)
     parser.add_argument("--annealing_period", default=30, type=int)
@@ -439,8 +449,8 @@ def main():
                     "hand_weight": 1.0,
                     "object_weight": 0.0,  # Object is fixed at origin for now
                     "hand_position_weight": 10.0,  # Wrist position important
-                    "hand_rotation_weight": 5.0,   # Wrist orientation
-                    "finger_weight": 1.0,          # Fingers can deviate more
+                    "hand_rotation_weight": 5.0,  # Wrist orientation
+                    "finger_weight": 1.0,  # Fingers can deviate more
                 },
             )
         )
@@ -526,28 +536,45 @@ def main():
     # =========================================================================
     # 7. Create Optimizer
     # =========================================================================
-    optimizer = MalaStarTrajectoryOptimizer(
-        fix_contacts=True,  # Keep contacts fixed for trajectory
-        switch_possibility=0.0,
-        starting_temperature=args.starting_temperature,
-        temperature_decay=args.temperature_decay,
-        annealing_period=args.annealing_period,
-        step_size=args.step_size,
-        stepsize_period=args.stepsize_period,
-        mu=args.mu,
-        clip_grad=args.clip_grad,
-        batch_size_per_object=args.batch_size,
-        profiler=profiler,
-    )
-    print(f"\nOptimizer: MalaStarTrajectoryOptimizer")
-    print(f"  step_size={args.step_size}, temp={args.starting_temperature}")
+    debug_mode = True  # Enable debugging to trace gradients
+
+    if args.optimizer == "adam":
+        optimizer = AdamOptimizer(lr=args.lr, debug=debug_mode)
+        print(f"\nOptimizer: AdamOptimizer (recommended for refinement)")
+        print(f"  lr={args.lr}, debug={debug_mode}")
+
+        # IMPORTANT: Initialize Adam with persistent parameters
+        print(f"  Initializing Adam with persistent parameters...")
+        state = optimizer.initialize(state)
+        print(f"  Adam initialized successfully")
+    else:
+        optimizer = MalaStarTrajectoryOptimizer(
+            fix_contacts=True,  # Keep contacts fixed for trajectory
+            switch_possibility=0.0,
+            starting_temperature=args.starting_temperature,
+            temperature_decay=args.temperature_decay,
+            annealing_period=args.annealing_period,
+            step_size=args.step_size,
+            stepsize_period=args.stepsize_period,
+            mu=args.mu,
+            clip_grad=args.clip_grad,
+            batch_size_per_object=args.batch_size,
+            profiler=profiler,
+        )
+        print(f"\nOptimizer: MalaStarTrajectoryOptimizer")
+        print(f"  step_size={args.step_size}, temp={args.starting_temperature}")
 
     # =========================================================================
-    # 8. Initial evaluation
+    # 8. Initial evaluation (no_grad to avoid graph conflict with optimizer)
     # =========================================================================
-    initial_costs = problem.evaluate_all(state)
-    initial_energy = problem.total_energy(state)
+    with torch.no_grad():
+        context.clear_step_cache()  # Clear cache before evaluation
+        initial_costs = problem.evaluate_all(state)
+        initial_energy = problem.total_energy(state)
     print(f"\nInitial energy: mean={initial_energy.mean():.2f}, best={initial_energy.min():.2f}")
+    print("Initial cost breakdown:")
+    for k, v in initial_costs.items():
+        print(f"  {k}: mean={v.mean():.4f}")
 
     # =========================================================================
     # 9. Main optimization loop
@@ -561,9 +588,11 @@ def main():
             state = optimizer.step(state, problem)
 
             if step % 50 == 0:
-                log_energy = optimizer._current_energy
-                if log_energy is not None:
-                    print(f"  Step {step}: mean={log_energy.mean():.2f}, best={log_energy.min():.2f}")
+                # Compute energy for logging
+                with torch.no_grad():
+                    context.clear_step_cache()
+                    log_energy = problem.total_energy(state)
+                print(f"  Step {step}: mean={log_energy.mean():.2f}, best={log_energy.min():.2f}")
 
         profiler.step_done()
 
@@ -574,8 +603,10 @@ def main():
     # =========================================================================
     profiler.summary()
 
-    final_costs = problem.evaluate_all(state)
-    final_energy = problem.total_energy(state)
+    with torch.no_grad():
+        context.clear_step_cache()
+        final_costs = problem.evaluate_all(state)
+        final_energy = problem.total_energy(state)
 
     print("\n" + "=" * 70)
     print("=== Final Results ===")
