@@ -28,12 +28,14 @@ class OptimizationProblem:
     Attributes:
         context: Shared optimization context
         costs: Ordered dict of cost functions
+        profiler: Optional profiler for timing cost evaluations
     """
 
-    def __init__(self, context: OptimizationContext):
+    def __init__(self, context: OptimizationContext, profiler=None):
         self.context = context
         self.costs: OrderedDict[str, CostFunction] = OrderedDict()
         self._weight_schedule: Dict[str, Any] = {}
+        self.profiler = profiler
 
     def add_cost(self, cost: CostFunction):
         """Add a cost function to the problem."""
@@ -61,6 +63,14 @@ class OptimizationProblem:
         """Enable or disable a cost function."""
         self.costs[name].enabled = enabled
 
+    def _profile_section(self, name: str):
+        """Context manager for profiling a section."""
+        from contextlib import nullcontext
+
+        if self.profiler is not None:
+            return self.profiler.section(name)
+        return nullcontext()
+
     def total_energy(self, state: "TrajectoryState") -> Tensor:
         """
         Compute total weighted energy.
@@ -81,7 +91,8 @@ class OptimizationProblem:
 
         for cost in self.costs.values():
             if cost.enabled:
-                energy = cost(state, self.context)
+                with self._profile_section(f"cost.{cost.name}"):
+                    energy = cost(state, self.context)
                 total = total + energy
 
         return total

@@ -7,7 +7,7 @@ Supports TWO initialization modes:
    - Random initial poses from convex hull sampling
    - Prior has jitter for exploration
    - Matches fit.py behavior for grasp synthesis
-   
+
 2. TRAJECTORY REFINEMENT (--init_mode prior):
    - All batches start from the SAME prior pose (no jitter)
    - Suitable for refining reference trajectories from video
@@ -59,16 +59,15 @@ from graspqp.core import GraspPriorLoader, ObjectModel
 from graspqp.core.initializations import initialize_convex_hull
 from graspqp.hands import AVAILABLE_HANDS, get_hand_model
 from graspqp.metrics import GraspSpanMetricFactory
-from graspqp.utils.profiler import get_profiler
-from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
-
-# Import from NEW optimization framework
-from graspqp.optim.state import TrajectoryState, ReferenceTrajectory
 from graspqp.optim.context import OptimizationContext
-from graspqp.optim.problem import OptimizationProblem
 from graspqp.optim.costs.grasp import ContactDistanceCost, ForceClosureCost, JointLimitCost, PriorPoseCost
 from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
 from graspqp.optim.optimizers.mala_star import MalaStarOptimizer
+from graspqp.optim.problem import OptimizationProblem
+# Import from NEW optimization framework
+from graspqp.optim.state import ReferenceTrajectory, TrajectoryState
+from graspqp.utils.profiler import get_profiler
+from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
 
 def parse_args():
@@ -344,8 +343,10 @@ def main():
                 prior_config.jitter_translation = 0.02 * jitter_scale  # ~2cm at scale 1.0
                 prior_config.jitter_rotation = 0.1 * jitter_scale  # ~0.1 rad at scale 1.0
                 prior_config.jitter_joints = 0.1 * jitter_scale
-                print(f"  Jitter scale: {jitter_scale} (trans={prior_config.jitter_translation:.3f}, "
-                      f"rot={prior_config.jitter_rotation:.3f}, joints={prior_config.jitter_joints:.3f})")
+                print(
+                    f"  Jitter scale: {jitter_scale} (trans={prior_config.jitter_translation:.3f}, "
+                    f"rot={prior_config.jitter_rotation:.3f}, joints={prior_config.jitter_joints:.3f})"
+                )
             elif args.init_mode == "prior":
                 # Default for prior mode: moderate jitter for exploration
                 jitter_scale = 1.0  # Use config defaults which are reasonable
@@ -427,7 +428,7 @@ def main():
     # =========================================================================
     # 6. Create OptimizationProblem with costs
     # =========================================================================
-    problem = OptimizationProblem(context)
+    problem = OptimizationProblem(context, profiler=profiler)
 
     # Define weight dict for metrics
     weight_dict = {
@@ -440,10 +441,12 @@ def main():
     }
 
     # Add costs (using new framework cost classes)
-    problem.add_cost(ContactDistanceCost(
-        name="contact_distance",
-        weight=args.w_dis,
-    ))
+    problem.add_cost(
+        ContactDistanceCost(
+            name="contact_distance",
+            weight=args.w_dis,
+        )
+    )
 
     # Force closure cost
     fc_cost = ForceClosureCost(
@@ -463,20 +466,26 @@ def main():
     fc_cost.set_energy_function(energy_fnc)
     problem.add_cost(fc_cost)
 
-    problem.add_cost(PenetrationCost(
-        name="penetration",
-        weight=args.w_pen,
-    ))
+    problem.add_cost(
+        PenetrationCost(
+            name="penetration",
+            weight=args.w_pen,
+        )
+    )
 
-    problem.add_cost(SelfPenetrationCost(
-        name="self_penetration",
-        weight=args.w_spen,
-    ))
+    problem.add_cost(
+        SelfPenetrationCost(
+            name="self_penetration",
+            weight=args.w_spen,
+        )
+    )
 
-    problem.add_cost(JointLimitCost(
-        name="joint_limits",
-        weight=args.w_joints,
-    ))
+    problem.add_cost(
+        JointLimitCost(
+            name="joint_limits",
+            weight=args.w_joints,
+        )
+    )
 
     # Prior pose cost (if prior specified)
     if prior_pose is not None and args.w_prior > 0:
@@ -504,6 +513,7 @@ def main():
         stepsize_period=args.stepsize_period,
         mu=args.mu,
         clip_grad=args.clip_grad,
+        profiler=profiler,  # Pass profiler for detailed timing
     )
     print(f"\nOptimizer: MalaStarOptimizer (from new framework)")
     print(f"  step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
@@ -533,8 +543,8 @@ def main():
     print(f"  Penetration (raw): {pen_before.mean().item():.4f}")
 
     # First, compute using fit.py's calculate_energy for comparison
-    from graspqp.core.energy import calculate_energy as fit_calculate_energy
     from graspqp.core import compute_prior_energy as fit_compute_prior_energy
+    from graspqp.core.energy import calculate_energy as fit_calculate_energy
 
     fit_energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "E_prior"]
     fit_losses = fit_calculate_energy(
@@ -656,11 +666,7 @@ def main():
             if step % 100 == 0 or step == 1:
                 with profiler.section("logging"):
                     # Save gradient before logging (evaluate_all may clear it via set_parameters)
-                    saved_grad = (
-                        hand_model.hand_pose.grad.clone()
-                        if hand_model.hand_pose.grad is not None
-                        else None
-                    )
+                    saved_grad = hand_model.hand_pose.grad.clone() if hand_model.hand_pose.grad is not None else None
 
                     current_costs = problem.evaluate_all(state)
                     log_energy = problem.total_energy(state)
@@ -689,8 +695,10 @@ def main():
     print("\n" + "=" * 70)
     print("=== Final Results ===")
     print("=" * 70)
-    print(f"Energy: best={final_energy.min().item():.2f}, mean={final_energy.mean().item():.2f}, "
-          f"worst={final_energy.max().item():.2f}")
+    print(
+        f"Energy: best={final_energy.min().item():.2f}, mean={final_energy.mean().item():.2f}, "
+        f"worst={final_energy.max().item():.2f}"
+    )
     print("Breakdown:")
     for k, v in final_costs.items():
         print(f"  {k}: mean={v.mean().item():.4f}, min={v.min().item():.4f}")

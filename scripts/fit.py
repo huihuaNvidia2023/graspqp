@@ -551,7 +551,9 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
                     if hand_model.hand_pose.grad is not None:
                         g = hand_model.hand_pose.grad
                         print(f"  grad norm={g.norm().item():.4f}")
-                        print(f"  grad trans={g[:,:3].norm().item():.2f}, rot={g[:,3:9].norm().item():.2f}, joints={g[:,9:].norm().item():.2f}")
+                        print(
+                            f"  grad trans={g[:,:3].norm().item():.2f}, rot={g[:,3:9].norm().item():.2f}, joints={g[:,9:].norm().item():.2f}"
+                        )
 
                 energy[accept] = new_energy[accept]
                 for loss_name, loss_value in new_energies.items():

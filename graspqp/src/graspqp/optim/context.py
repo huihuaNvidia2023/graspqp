@@ -4,7 +4,7 @@ Optimization context providing shared resources for all costs.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Callable, Dict, List, Optional, Tuple
 
 import torch
 from torch import Tensor
@@ -316,3 +316,33 @@ class OptimizationContext:
 
         self.set_cached(cache_key, surface_points, scope="step")
         return surface_points
+
+    def get_contact_sdf_cached(self, flat_hand: Tensor) -> Tuple[Tensor, Tensor]:
+        """
+        Get SDF distance and normals at contact points, using cache if unchanged.
+
+        This is expensive (SDF lookup) so caching is critical when multiple costs
+        need the same SDF data (e.g. ContactDistanceCost and ForceClosureCost).
+
+        Args:
+            flat_hand: Flattened hand states, shape (N, D_hand)
+
+        Returns:
+            Tuple of:
+                - distance: SDF distances at contact points, shape (N, n_contacts)
+                - contact_normal: Surface normals at contact points, shape (N, n_contacts, 3)
+        """
+        cache_key = "_contact_sdf"
+        cached = self.get_cached(cache_key)
+        if cached is not None:
+            return cached
+
+        # Get contact points (also cached)
+        contact_points = self.get_contact_points_cached(flat_hand)
+
+        # Compute SDF (expensive!)
+        distance, contact_normal = self.object_model.cal_distance(contact_points)
+
+        # Cache the result
+        self.set_cached(cache_key, (distance, contact_normal), scope="step")
+        return distance, contact_normal

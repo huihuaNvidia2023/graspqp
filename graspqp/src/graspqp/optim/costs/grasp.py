@@ -64,11 +64,8 @@ class ContactDistanceCost(PerFrameCost):
         # Flatten to (B*T, D) for batched FK
         flat_hand = state.flat_hand
 
-        # Get contact points using cached FK
-        contact_points = ctx.get_contact_points_cached(flat_hand)  # (B*T, n_contacts, 3)
-
-        # Compute SDF and normals at contact points
-        distance, contact_normal = ctx.object_model.cal_distance(contact_points)  # (B*T, n_contacts)
+        # Get SDF distance and normals at contact points (CACHED - expensive operation!)
+        distance, contact_normal = ctx.get_contact_sdf_cached(flat_hand)  # (B*T, n_contacts)
 
         if self.method == "dexgraspnet":
             # Simple method: sum of absolute distances
@@ -142,8 +139,8 @@ class ForceClosureCost(PerFrameCost):
         # Get contact points using cached FK
         contact_points = ctx.get_contact_points_cached(flat_hand)
 
-        # Get contact normals from SDF
-        distance, contact_normal = ctx.object_model.cal_distance(contact_points)
+        # Get SDF distance and normals (CACHED - expensive operation!)
+        distance, contact_normal = ctx.get_contact_sdf_cached(flat_hand)
 
         # Compute force closure energy
         E_fc, _ = self._energy_fnc(
