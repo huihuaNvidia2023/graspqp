@@ -114,11 +114,10 @@ class MalaStarOptimizer(Optimizer):
         # =====================================================================
         # 1. Try step: propose new parameters using gradient
         # =====================================================================
-        # Increment step counter FIRST (like fit.py's try_step does at the end,
-        # but accept_step uses the incremented value)
+        # Increment step counter first
         self._per_batch_step += 1
 
-        # Compute step size with decay (uses incremented step, like fit.py)
+        # Compute step size with decay
         s = self.step_size * (self.temperature_decay ** (self._per_batch_step // self.stepsize_period))
         step_size = s.unsqueeze(-1)  # (B, 1)
 

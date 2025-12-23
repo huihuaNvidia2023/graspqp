@@ -2,30 +2,25 @@
 """
 Sanity check: Use NEW optimization framework to solve same problem as fit.py.
 
-fit.py is a SPECIAL CASE of the trajectory optimization framework:
-- T=1 (single frame)
-- Prior pose = Reference trajectory to track
-- Object at world origin
-- Contact switching ALLOWED during optimization (fix_contacts=False)
+Supports TWO initialization modes:
+1. GRASP GENERATION (--init_mode convex_hull, default):
+   - Random initial poses from convex hull sampling
+   - Prior has jitter for exploration
+   - Matches fit.py behavior for grasp synthesis
+   
+2. TRAJECTORY REFINEMENT (--init_mode prior):
+   - All batches start from the SAME prior pose (no jitter)
+   - Suitable for refining reference trajectories from video
+   - All batches should converge to similar solutions
 
 This script FULLY USES the new optim framework:
-- TrajectoryState for state representation
-- ReferenceTrajectory for prior pose
+- TrajectoryState for state representation (T=1 single frame)
+- ReferenceTrajectory for prior/reference pose
 - OptimizationContext for shared resources
 - OptimizationProblem with cost functions
 - MalaStarOptimizer from the new framework
 
-Usage:
-    python scripts/sanity_check_optim.py \
-        --data_root_path ./objects \
-        --object_code_list apple \
-        --hand_name allegro \
-        --batch_size 16 \
-        --n_iter 500 \
-        --prior_file configs/extracted_prior.yaml \
-        --w_prior 100
-
-    # With profiling and metrics output:
+Usage (grasp generation - matches fit.py):
     python scripts/sanity_check_optim.py \
         --data_root_path ./objects \
         --object_code_list apple \
@@ -34,8 +29,18 @@ Usage:
         --n_iter 500 \
         --prior_file configs/extracted_prior.yaml \
         --w_prior 100 \
-        --profile \
-        --output_metrics results/metrics.json
+        --init_mode convex_hull
+
+Usage (trajectory refinement):
+    python scripts/sanity_check_optim.py \
+        --data_root_path ./objects \
+        --object_code_list apple \
+        --hand_name allegro \
+        --batch_size 16 \
+        --n_iter 500 \
+        --prior_file configs/extracted_prior.yaml \
+        --w_prior 100 \
+        --init_mode prior
 """
 
 import argparse
@@ -113,6 +118,16 @@ def parse_args():
     parser.add_argument("--max_lambda_limit", default=20.0, type=float)
     parser.add_argument("--n_friction_cone", default=4, type=int)
     parser.add_argument("--energy_name", default="graspqp", type=str)
+
+    # Initialization mode
+    parser.add_argument(
+        "--init_mode",
+        default="convex_hull",
+        type=str,
+        choices=["convex_hull", "prior"],
+        help="Initialization mode: 'convex_hull' for random grasp generation (matches fit.py), "
+        "'prior' for trajectory refinement (all batches start from prior pose)",
+    )
 
     # Profiling and metrics output
     parser.add_argument("--profile", action="store_true", help="Enable detailed profiling")
@@ -298,19 +313,23 @@ def main():
     )
     object_model.initialize(args.object_code_list, extension=args.mesh_extension)
 
-    # Initialize with convex hull (sets initial hand_pose and contact_point_indices)
-    initialize_convex_hull(hand_model, object_model, args)
-    print(f"n_contact_candidates: {hand_model.n_contact_candidates}")
-
     # =========================================================================
     # 2. Load prior pose (if specified)
     # =========================================================================
     prior_pose = None
+    prior_config = None
     if args.prior_file is not None:
         print(f"\nLoading prior from: {args.prior_file}")
         prior_config = GraspPriorLoader.load_from_file(args.prior_file)
 
         if prior_config.priors:
+            # For trajectory refinement: disable jitter to keep all batches identical
+            if args.init_mode == "prior":
+                print(f"  Mode: trajectory refinement (init from prior, no jitter)")
+                prior_config.jitter_translation = 0.0
+                prior_config.jitter_rotation = 0.0
+                prior_config.jitter_joints = 0.0
+
             prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
             prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)  # (B, D_hand)
 
@@ -321,7 +340,27 @@ def main():
             print(f"  Loaded {len(prior_config.priors)} prior(s), weight={args.w_prior}")
 
     # =========================================================================
-    # 3. Create TrajectoryState (T=1 single frame)
+    # 3. Initialize hand pose based on mode
+    # =========================================================================
+    if args.init_mode == "convex_hull":
+        # Grasp generation mode: random init (matches fit.py)
+        print(f"\nInitialization mode: convex_hull (random grasp generation)")
+        initialize_convex_hull(hand_model, object_model, args)
+    elif args.init_mode == "prior":
+        # Trajectory refinement mode: init from prior
+        if prior_pose is None:
+            raise ValueError("--init_mode=prior requires --prior_file to be specified")
+        print(f"\nInitialization mode: prior (trajectory refinement)")
+        # Initialize contacts first (need valid contact candidates)
+        initialize_convex_hull(hand_model, object_model, args)
+        # Then override hand_pose with prior
+        hand_model.set_parameters(prior_pose, hand_model.contact_point_indices)
+        print(f"  All {total_batch_size} batches initialized to same prior pose")
+
+    print(f"n_contact_candidates: {hand_model.n_contact_candidates}")
+
+    # =========================================================================
+    # 4. Create TrajectoryState (T=1 single frame)
     # =========================================================================
     D_hand = hand_model.hand_pose.shape[1]
     D_obj = 7  # pos(3) + quat(4)
@@ -341,7 +380,7 @@ def main():
     print(f"\nInitial TrajectoryState: B={state.B}, T={state.T}, D_hand={state.D_hand}")
 
     # =========================================================================
-    # 4. Create OptimizationContext
+    # 5. Create OptimizationContext
     # =========================================================================
     # Create a reference trajectory (prior pose as reference for T=1)
     if prior_pose is not None:
@@ -369,7 +408,7 @@ def main():
     )
 
     # =========================================================================
-    # 5. Create OptimizationProblem with costs
+    # 6. Create OptimizationProblem with costs
     # =========================================================================
     problem = OptimizationProblem(context)
 
@@ -436,7 +475,7 @@ def main():
         print(f"  {name}: weight={cost.weight}")
 
     # =========================================================================
-    # 6. Create MalaStarOptimizer (from new framework)
+    # 7. Create MalaStarOptimizer (from new framework)
     # =========================================================================
     optimizer = MalaStarOptimizer(
         fix_contacts=False,  # Allow contact switching (like fit.py)
@@ -453,7 +492,7 @@ def main():
     print(f"  step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
 
     # =========================================================================
-    # 7. Compute initial energy - DEBUG: compare with fit.py
+    # 8. Compute initial energy - DEBUG: compare with fit.py
     # =========================================================================
     print("\n" + "=" * 70)
     print("DEBUG: Initial Energy Comparison")
@@ -569,7 +608,7 @@ def main():
     optimization_start_time = time.perf_counter()
 
     # =========================================================================
-    # 8. Main optimization loop
+    # 9. Main optimization loop
     # =========================================================================
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
         with profiler.section("step"):
@@ -602,7 +641,7 @@ def main():
         profiler.step_done()
 
     # =========================================================================
-    # 9. Final results
+    # 10. Final results
     # =========================================================================
     optimization_end_time = time.perf_counter()
     total_time = optimization_end_time - optimization_start_time
