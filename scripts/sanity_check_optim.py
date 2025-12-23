@@ -512,7 +512,8 @@ def main():
         stepsize_period=args.stepsize_period,
         mu=args.mu,
         clip_grad=args.clip_grad,
-        profiler=profiler,  # Pass profiler for detailed timing
+        batch_size_per_object=args.batch_size,  # For z_score computation
+        profiler=profiler,
     )
     print(f"\nOptimizer: MalaStarOptimizer (from new framework)")
     print(f"  step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
@@ -533,10 +534,6 @@ def main():
     # Start timing
     optimization_start_time = time.perf_counter()
 
-    # Track current energy for z_score computation (like fit.py)
-    # The optimizer internally tracks this, but we need it for z_score
-    current_energy = initial_energy.clone()
-
     # =========================================================================
     # 9. Main optimization loop
     # =========================================================================
@@ -545,27 +542,18 @@ def main():
             # Clear step cache
             context.clear_step_cache()
 
-            # Compute z_score for temperature adjustment (like fit.py)
-            # z_score measures how "bad" each batch is relative to the mean/std
-            # Higher z_score -> higher temperature -> more exploration for stuck batches
-            energy_batch = current_energy.view(-1, args.batch_size)  # (num_objects, batch_size)
-            mean_energy = energy_batch.mean(-1, keepdim=True)  # (num_objects, 1)
-            std_energy = energy_batch.std(-1, keepdim=True).clamp(min=1e-6)  # (num_objects, 1)
-            z_score = ((energy_batch - mean_energy) / std_energy).view(-1)  # (B,)
-
-            # Optimizer step (handles gradient, accept/reject, contact sampling)
+            # Optimizer step (handles gradient, accept/reject, contact sampling, z_score)
             with profiler.section("optimizer_step"):
-                state = optimizer.step(state, problem, z_score=z_score)
-
-            # Update current energy from optimizer's internal state
-            if optimizer._current_energy is not None:
-                current_energy = optimizer._current_energy.clone()
+                state = optimizer.step(state, problem)
 
             # Periodic logging
             if step % 100 == 0:
                 with profiler.section("logging"):
-                    log_energy = current_energy
-                    print(f"Step {step}: energy={log_energy.mean().item():.2f} (best={log_energy.min().item():.2f})")
+                    log_energy = optimizer._current_energy
+                    if log_energy is not None:
+                        print(
+                            f"Step {step}: energy={log_energy.mean().item():.2f} (best={log_energy.min().item():.2f})"
+                        )
 
         profiler.step_done()
 

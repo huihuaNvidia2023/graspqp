@@ -52,6 +52,7 @@ class MalaStarOptimizer(Optimizer):
         stepsize_period: int = 50,
         mu: float = 0.98,
         clip_grad: bool = False,
+        batch_size_per_object: Optional[int] = None,  # For z_score computation
         profiler=None,  # Optional profiler for timing
         config: Optional[Dict[str, Any]] = None,
     ):
@@ -66,6 +67,7 @@ class MalaStarOptimizer(Optimizer):
         self.stepsize_period = stepsize_period
         self.mu = mu
         self.clip_grad = clip_grad
+        self.batch_size_per_object = batch_size_per_object
         self.profiler = profiler
 
         # State variables (initialized on first step)
@@ -87,11 +89,38 @@ class MalaStarOptimizer(Optimizer):
             return self.profiler.section(name)
         return nullcontext()
 
+    def _compute_z_score(self, energy: Tensor) -> Optional[Tensor]:
+        """
+        Compute z-score for adaptive temperature adjustment.
+
+        Higher z_score (worse outlier) -> higher temperature -> more exploration.
+        This helps stuck batches escape local minima.
+
+        Args:
+            energy: Per-batch energy, shape (B,)
+
+        Returns:
+            z_score: (energy - mean) / std per object group, shape (B,)
+                     None if batch_size_per_object is not set.
+        """
+        if self.batch_size_per_object is None:
+            return None
+
+        # Reshape to (num_objects, batch_size_per_object)
+        B = energy.shape[0]
+        if B % self.batch_size_per_object != 0:
+            return None  # Can't evenly divide
+
+        energy_grouped = energy.view(-1, self.batch_size_per_object)
+        mean = energy_grouped.mean(dim=-1, keepdim=True)
+        std = energy_grouped.std(dim=-1, keepdim=True).clamp(min=1e-6)
+        z_score = ((energy_grouped - mean) / std).view(-1)
+        return z_score
+
     def step(
         self,
         state: "TrajectoryState",
         problem: "OptimizationProblem",
-        z_score: Optional[Tensor] = None,
     ) -> "TrajectoryState":
         """
         Perform one MALA* optimization step.
@@ -99,13 +128,13 @@ class MalaStarOptimizer(Optimizer):
         Args:
             state: Current trajectory state
             problem: Optimization problem with costs
-            z_score: Optional per-batch z-score for adaptive temperature.
-                     Higher z_score (worse outlier) -> higher temperature -> more exploration.
-                     Shape: (B,). Computed as (energy - mean) / std per object batch.
 
         Flow:
         1. If first call: compute initial energy and gradient, return
         2. Otherwise: use gradient to propose, compute new energy, accept/reject
+
+        Note: z_score for adaptive temperature is computed internally from _current_energy
+        if batch_size_per_object was set during initialization.
         """
         device = state.device
         hand_model = problem.context.hand_model
@@ -229,6 +258,7 @@ class MalaStarOptimizer(Optimizer):
 
             # z_score-based temperature adjustment (like fit.py)
             # Higher z_score (worse energy relative to batch) -> higher temperature -> more exploration
+            z_score = self._compute_z_score(old_energy)
             if z_score is not None:
                 proba = _normal.cdf(z_score.detach())  # Convert z_score to probability [0, 1]
                 temperature = temperature * (1 + proba)  # Scale temperature by (1 + proba)
