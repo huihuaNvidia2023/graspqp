@@ -44,6 +44,8 @@ from graspqp.metrics import GraspSpanMetricFactory
 from graspqp.optim.context import OptimizationContext
 from graspqp.optim.costs.grasp import ContactDistanceCost, ForceClosureCost, JointLimitCost, PriorPoseCost
 from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
+from graspqp.optim.costs.reference import ReferenceTrackingCost
+from graspqp.optim.costs.temporal import VelocitySmoothnessCost
 from graspqp.optim.optimizers.mala_star_trajectory import MalaStarTrajectoryOptimizer
 from graspqp.optim.problem import OptimizationProblem
 from graspqp.optim.state import ReferenceTrajectory, TrajectoryState
@@ -60,15 +62,21 @@ def parse_args():
     parser.add_argument("--n_iter", default=200, type=int)
     parser.add_argument("--n_frames", default=2, type=int, help="Number of frames (T)")
 
-    # Weights
-    parser.add_argument("--w_dis", default=100.0, type=float)
-    parser.add_argument("--w_fc", default=1.0, type=float)
-    parser.add_argument("--w_pen", default=100.0, type=float)
-    parser.add_argument("--w_spen", default=10.0, type=float)
-    parser.add_argument("--w_joints", default=1.0, type=float)
-    parser.add_argument("--w_prior", default=10.0, type=float)
-    parser.add_argument("--w_svd", default=0.1, type=float)
+    # Weights (following design doc recommendations for video post-processing)
+    # PRIMARY: Stay close to reference trajectory (the "anchor")
+    parser.add_argument("--w_ref", default=100.0, type=float, help="Reference tracking weight (PRIMARY)")
+    # HARD CONSTRAINTS: Physical validity
+    parser.add_argument("--w_pen", default=1000.0, type=float, help="Penetration weight (HARD)")
+    parser.add_argument("--w_spen", default=100.0, type=float, help="Self-penetration weight")
+    # SOFT CONSTRAINTS: Grasp quality
+    parser.add_argument("--w_dis", default=50.0, type=float, help="Contact distance weight")
+    parser.add_argument("--w_fc", default=10.0, type=float, help="Force closure weight")
+    parser.add_argument("--w_joints", default=1.0, type=float, help="Joint limits weight")
+    # TEMPORAL: Smoothness
     parser.add_argument("--w_smooth", default=1.0, type=float, help="Velocity smoothness weight")
+    # Legacy (optional)
+    parser.add_argument("--w_prior", default=0.0, type=float, help="Prior pose weight (deprecated, use w_ref)")
+    parser.add_argument("--w_svd", default=0.1, type=float)
 
     # Optimizer settings
     parser.add_argument("--starting_temperature", default=18.0, type=float)
@@ -418,7 +426,45 @@ def main():
     # =========================================================================
     problem = OptimizationProblem(context, profiler=profiler)
 
-    # Add costs
+    # -------------------------------------------------------------------------
+    # PRIMARY COST: Reference tracking - stay close to video trajectory
+    # This is the "anchor" that keeps the optimization grounded
+    # -------------------------------------------------------------------------
+    if args.w_ref > 0:
+        problem.add_cost(
+            ReferenceTrackingCost(
+                name="reference_tracking",
+                weight=args.w_ref,
+                config={
+                    "hand_weight": 1.0,
+                    "object_weight": 0.0,  # Object is fixed at origin for now
+                    "hand_position_weight": 10.0,  # Wrist position important
+                    "hand_rotation_weight": 5.0,   # Wrist orientation
+                    "finger_weight": 1.0,          # Fingers can deviate more
+                },
+            )
+        )
+
+    # -------------------------------------------------------------------------
+    # HARD CONSTRAINTS: Physical validity
+    # -------------------------------------------------------------------------
+    problem.add_cost(
+        PenetrationCost(
+            name="penetration",
+            weight=args.w_pen,
+        )
+    )
+
+    problem.add_cost(
+        SelfPenetrationCost(
+            name="self_penetration",
+            weight=args.w_spen,
+        )
+    )
+
+    # -------------------------------------------------------------------------
+    # SOFT CONSTRAINTS: Grasp quality
+    # -------------------------------------------------------------------------
     problem.add_cost(
         ContactDistanceCost(
             name="contact_distance",
@@ -443,27 +489,26 @@ def main():
     problem.add_cost(fc_cost)
 
     problem.add_cost(
-        PenetrationCost(
-            name="penetration",
-            weight=args.w_pen,
-        )
-    )
-
-    problem.add_cost(
-        SelfPenetrationCost(
-            name="self_penetration",
-            weight=args.w_spen,
-        )
-    )
-
-    problem.add_cost(
         JointLimitCost(
             name="joint_limits",
             weight=args.w_joints,
         )
     )
 
-    # Prior pose cost
+    # -------------------------------------------------------------------------
+    # TEMPORAL COSTS: Smoothness (for trajectory, T > 1)
+    # -------------------------------------------------------------------------
+    if T > 1 and args.w_smooth > 0:
+        problem.add_cost(
+            VelocitySmoothnessCost(
+                name="velocity_smoothness",
+                weight=args.w_smooth,
+            )
+        )
+
+    # -------------------------------------------------------------------------
+    # LEGACY: Prior pose cost (deprecated, use reference_tracking instead)
+    # -------------------------------------------------------------------------
     if args.w_prior > 0:
         prior_cost = PriorPoseCost(
             name="prior_pose",

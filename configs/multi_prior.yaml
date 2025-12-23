@@ -1,5 +1,9 @@
-# Multiple prior poses for diverse initialization
-# Useful when you want to explore different grasp approaches
+# Multi-frame trajectory prior simulating video-extracted poses
+# These poses are CLOSE to the object (within a few mm or slightly penetrating)
+# This simulates realistic video extraction noise where hand may be:
+# - Slightly penetrating the object (negative distance)
+# - Just touching the surface
+# - A few mm away
 
 contact:
   mode: constrained
@@ -12,19 +16,92 @@ contact:
   max_contacts_per_link: 3
 
 priors:
-  # Top-down approach
-  - translation: [0.0, 0.0, 0.12]
-    rotation: [1, 0, 0, 0]
+  # Frame 0: Approaching - hand ~5mm from object, fingers starting to curl
+  - translation: [-0.055, -0.015, 0.005]
+    quaternion: [-0.16, 0.81, 0.46, 0.31]
+    joints:
+      index_joint_0: -0.10
+      index_joint_1: 0.50
+      index_joint_2: 0.75
+      index_joint_3: 0.70
+      middle_joint_0: 0.12
+      middle_joint_1: 0.55
+      middle_joint_2: 0.80
+      middle_joint_3: 0.55
+      ring_joint_0: -0.15
+      ring_joint_1: 0.15
+      ring_joint_2: 0.50
+      ring_joint_3: 0.40
+      thumb_joint_0: 1.15
+      thumb_joint_1: 0.20
+      thumb_joint_2: 0.70
+      thumb_joint_3: 0.05
 
-  # Side approach (rotated 90 degrees around X)
-  - translation: [0.0, 0.1, 0.05]
-    rotation: [0.707, 0.707, 0, 0]
+  # Frame 1: Contact - hand touching/slightly penetrating, fingers wrapped
+  - translation: [-0.050, -0.012, 0.002]
+    quaternion: [-0.16, 0.81, 0.46, 0.31]
+    joints:
+      index_joint_0: -0.10
+      index_joint_1: 0.60
+      index_joint_2: 0.85
+      index_joint_3: 0.80
+      middle_joint_0: 0.12
+      middle_joint_1: 0.65
+      middle_joint_2: 0.90
+      middle_joint_3: 0.65
+      ring_joint_0: -0.15
+      ring_joint_1: 0.20
+      ring_joint_2: 0.60
+      ring_joint_3: 0.50
+      thumb_joint_0: 1.20
+      thumb_joint_1: 0.25
+      thumb_joint_2: 0.80
+      thumb_joint_3: 0.08
 
-  # Angled approach
-  - translation: [0.05, 0.05, 0.1]
-    rotation: [0.924, 0.383, 0, 0]  # 45 degree tilt
+  # Frame 2: Grasping - fingers tightened around object
+  - translation: [-0.048, -0.010, 0.000]
+    quaternion: [-0.16, 0.81, 0.46, 0.31]
+    joints:
+      index_joint_0: -0.10
+      index_joint_1: 0.70
+      index_joint_2: 0.95
+      index_joint_3: 0.90
+      middle_joint_0: 0.12
+      middle_joint_1: 0.75
+      middle_joint_2: 1.00
+      middle_joint_3: 0.75
+      ring_joint_0: -0.15
+      ring_joint_1: 0.25
+      ring_joint_2: 0.70
+      ring_joint_3: 0.60
+      thumb_joint_0: 1.25
+      thumb_joint_1: 0.30
+      thumb_joint_2: 0.90
+      thumb_joint_3: 0.10
 
-jitter_translation: 0.015
-jitter_rotation: 0.08
-jitter_joints: 0.08
-prior_weight: 8.0
+  # Frame 3: Secure grasp - final stable position
+  - translation: [-0.046, -0.008, -0.002]
+    quaternion: [-0.16, 0.81, 0.46, 0.31]
+    joints:
+      index_joint_0: -0.10
+      index_joint_1: 0.75
+      index_joint_2: 1.00
+      index_joint_3: 0.95
+      middle_joint_0: 0.12
+      middle_joint_1: 0.80
+      middle_joint_2: 1.05
+      middle_joint_3: 0.80
+      ring_joint_0: -0.15
+      ring_joint_1: 0.30
+      ring_joint_2: 0.75
+      ring_joint_3: 0.65
+      thumb_joint_0: 1.28
+      thumb_joint_1: 0.35
+      thumb_joint_2: 0.95
+      thumb_joint_3: 0.12
+
+# Small jitter to simulate video extraction noise
+jitter_translation: 0.003  # 3mm noise (realistic for video)
+jitter_rotation: 0.03
+jitter_joints: 0.03
+prior_weight: 10.0
