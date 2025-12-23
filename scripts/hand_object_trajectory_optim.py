@@ -71,7 +71,7 @@ def parse_args():
     parser.add_argument("--w_pen", default=100.0, type=float, help="Penetration weight")
     parser.add_argument("--w_spen", default=10.0, type=float, help="Self-penetration weight")
     parser.add_argument("--w_joints", default=1.0, type=float, help="Joint limits weight")
-    parser.add_argument("--w_prior", default=0.0, type=float, help="Prior pose weight")
+    parser.add_argument("--w_prior", default=None, type=float, help="Prior pose weight (None=use YAML default)")
     parser.add_argument("--w_svd", default=0.1, type=float)
     # Trajectory-specific (disabled by default for sanity check)
     parser.add_argument("--w_ref", default=0.0, type=float, help="Reference tracking weight (trajectory only)")
@@ -368,8 +368,8 @@ def main():
     reference_hand, prior_weight = load_trajectory_priors(args.prior_file, T, total_batch_size, hand_model, device)
     print(f"  Loaded trajectory: shape={reference_hand.shape}")
 
-    if args.w_prior == 0.0:
-        args.w_prior = prior_weight
+    if args.w_prior is None:
+        args.w_prior = prior_weight  # Use YAML default
     print(f"  Prior weight: {args.w_prior}")
 
     # =========================================================================

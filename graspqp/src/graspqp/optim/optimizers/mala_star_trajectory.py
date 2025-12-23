@@ -241,7 +241,11 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                 new_contacts_per_traj.unsqueeze(1).expand(B, T, n_contacts).reshape(B * T, n_contacts)
             )
 
-            # Update contact indices in context for FK
+            # CRITICAL: Update hand_model.contact_point_indices so that
+            # _compute_energy_and_grad uses the new contacts for energy computation.
+            # This was the bug - contacts were set in context but _compute_energy_and_grad
+            # reads from hand_model and overwrites context, so new contacts were never used.
+            hand_model.contact_point_indices = new_contacts_expanded
             problem.context.set_contact_indices(new_contacts_expanded)
 
             new_energy, new_grad = self._compute_energy_and_grad(proposed_state, problem)
@@ -294,7 +298,9 @@ class MalaStarTrajectoryOptimizer(Optimizer):
         final_state = state.clone()
         final_state.hand_states = proposed_hand.detach()
 
-        # Update contact indices in context (expanded version for FK)
+        # Update contact indices in hand_model and context (expanded version for FK)
+        # CRITICAL: Must update hand_model so next iteration reads correct contacts
+        hand_model.contact_point_indices = new_contacts_expanded
         problem.context.set_contact_indices(new_contacts_expanded)
 
         return final_state
@@ -353,6 +359,19 @@ class MalaStarTrajectoryOptimizer(Optimizer):
 
                 # Also update hand_pose for costs that read it
                 hand_model.hand_pose = flat_hand
+
+                # CRITICAL: Recompute contact_points from FK result and contact_point_indices
+                # This was missing - we updated contact_point_indices but not contact_points!
+                hand_model.all_contact_points, hand_model._all_contact_normals = (
+                    hand_model.get_contact_candidates(with_normals=True)
+                )
+                hand_model.contact_candidates = hand_model.all_contact_points
+                hand_model.contact_points = hand_model.all_contact_points.gather(
+                    1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                )
+                hand_model.contact_normals = hand_model._all_contact_normals.gather(
+                    1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                )
 
             # Create temporary state for cost evaluation
             temp_state = state.clone()
