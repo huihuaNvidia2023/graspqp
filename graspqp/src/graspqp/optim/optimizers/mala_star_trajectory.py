@@ -6,7 +6,8 @@ Key differences from mala_star.py:
 - Optimizes hand_states with shape (B, T, D_hand)
 - Computes energy summed over all T frames
 - Accept/reject operates on entire trajectories
-- Contact indices are FIXED for all frames (shared per trajectory)
+- Contact FINGERS are consistent across all frames (defined by sampler's preferred_links)
+- Contact POINTS can vary per frame (sampled independently within allowed fingers)
 
 This optimizer treats the trajectory as a single optimization unit.
 """
@@ -37,7 +38,10 @@ class MalaStarTrajectoryOptimizer(Optimizer):
     T frames, and the optimizer proposes changes to ALL frames simultaneously.
 
     Key design decisions:
-    - Contact indices are FIXED for all frames in a trajectory
+    - Contact FINGERS are consistent across all frames in a trajectory
+      (enforced by hierarchical sampler's preferred_links config)
+    - Contact POINTS within those fingers can vary per frame
+      (each frame samples independently from allowed fingers)
     - Accept/reject applies to the entire trajectory (all T frames together)
     - Energy is summed over frames, gradients propagate through all frames
     """
@@ -202,28 +206,31 @@ class MalaStarTrajectoryOptimizer(Optimizer):
             # =====================================================================
             # 2. Sample new contact indices (if not fixed)
             # =====================================================================
-            # Contact indices are stored as (B*T, n_contacts) in hand_model but
-            # are the SAME for all T frames in each trajectory.
-            # For accept/reject, we work with per-trajectory indices (B, n_contacts)
+            # Contact indices are stored as (B*T, n_contacts) in hand_model.
+            #
+            # IMPORTANT CONSTRAINT: Contact FINGERS must be consistent across all
+            # T frames in each trajectory, but contact POINTS within those fingers
+            # CAN vary per frame.
+            #
+            # This is achieved by using the hierarchical sampler's preferred_links
+            # config to define allowed fingers. Each frame samples independently,
+            # but all samples come from the same allowed finger set.
             n_contacts = hand_model.contact_point_indices.shape[-1]
-
-            # Get per-trajectory contact indices by taking first frame of each
-            current_contacts_per_traj = hand_model.contact_point_indices.reshape(B, T, n_contacts)[
-                :, 0
-            ]  # (B, n_contacts)
+            current_contacts_expanded = hand_model.contact_point_indices  # (B*T, n_contacts)
 
             if self.fix_contacts:
-                new_contacts_per_traj = current_contacts_per_traj.clone()
+                new_contacts_expanded = current_contacts_expanded.clone()
             else:
-                new_contacts_per_traj = self._sample_contacts(
-                    hand_model, problem.context, current_contacts_per_traj, device
+                # Sample new contacts - each frame gets independent samples from allowed fingers
+                new_contacts_expanded = self._sample_contacts_for_trajectory(
+                    hand_model, problem.context, B, T, current_contacts_expanded, device
                 )
 
             # =====================================================================
             # 3. Save old state
             # =====================================================================
             old_hand_states = state.hand_states.detach().clone()
-            old_contacts_per_traj = current_contacts_per_traj.clone()  # (B, n_contacts)
+            old_contacts_expanded = current_contacts_expanded.clone()  # (B*T, n_contacts)
             old_energy = self._current_energy.clone()
 
             # Increment step counter
@@ -236,15 +243,8 @@ class MalaStarTrajectoryOptimizer(Optimizer):
             proposed_state = state.clone()
             proposed_state.hand_states = proposed_hand
 
-            # Expand per-trajectory contacts to (B*T, n_contacts) for FK
-            new_contacts_expanded = (
-                new_contacts_per_traj.unsqueeze(1).expand(B, T, n_contacts).reshape(B * T, n_contacts)
-            )
-
             # CRITICAL: Update hand_model.contact_point_indices so that
             # _compute_energy_and_grad uses the new contacts for energy computation.
-            # This was the bug - contacts were set in context but _compute_energy_and_grad
-            # reads from hand_model and overwrites context, so new contacts were never used.
             hand_model.contact_point_indices = new_contacts_expanded
             problem.context.set_contact_indices(new_contacts_expanded)
 
@@ -274,21 +274,23 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                     print(f"  old_energy={old_energy.mean():.2f}, new_energy={new_energy.mean():.2f}")
                     print(f"  accept_rate={accept.float().mean():.2f}")
 
-                # Restore rejected trajectories (using per-trajectory contacts)
+                # Restore rejected trajectories
+                # Accept/reject is at trajectory level - all T frames together
                 if reject.any():
                     proposed_hand[reject] = old_hand_states[reject]
-                    new_contacts_per_traj[reject] = old_contacts_per_traj[reject]  # (B, n_contacts)
                     self._current_energy[reject] = old_energy[reject]
+
+                    # Restore contacts for ALL frames of rejected trajectories
+                    # Reshape to (B, T, n_contacts) for indexing, then back to (B*T, n_contacts)
+                    new_contacts_reshaped = new_contacts_expanded.reshape(B, T, n_contacts)
+                    old_contacts_reshaped = old_contacts_expanded.reshape(B, T, n_contacts)
+                    new_contacts_reshaped[reject] = old_contacts_reshaped[reject]
+                    new_contacts_expanded = new_contacts_reshaped.reshape(B * T, n_contacts)
                 else:
                     self._current_energy = new_energy
 
                 # Update accepted energies
                 self._current_energy[accept] = new_energy[accept]
-
-                # Re-expand contacts after accept/reject
-                new_contacts_expanded = (
-                    new_contacts_per_traj.unsqueeze(1).expand(B, T, n_contacts).reshape(B * T, n_contacts)
-                )
 
         self._step_count += 1
 
@@ -362,8 +364,8 @@ class MalaStarTrajectoryOptimizer(Optimizer):
 
                 # CRITICAL: Recompute contact_points from FK result and contact_point_indices
                 # This was missing - we updated contact_point_indices but not contact_points!
-                hand_model.all_contact_points, hand_model._all_contact_normals = (
-                    hand_model.get_contact_candidates(with_normals=True)
+                hand_model.all_contact_points, hand_model._all_contact_normals = hand_model.get_contact_candidates(
+                    with_normals=True
                 )
                 hand_model.contact_candidates = hand_model.all_contact_points
                 hand_model.contact_points = hand_model.all_contact_points.gather(
@@ -391,48 +393,70 @@ class MalaStarTrajectoryOptimizer(Optimizer):
         finally:
             problem.context._skip_set_parameters = False
 
-    def _sample_contacts(
+    def _sample_contacts_for_trajectory(
         self,
         hand_model,
         context,
-        current_contacts: Tensor,  # (B, n_contacts) per-trajectory contacts
+        B: int,
+        T: int,
+        current_contacts_expanded: Tensor,  # (B*T, n_contacts) current contacts
         device: torch.device,
     ) -> Tensor:
         """
-        Sample new contact indices with switch_possibility.
+        Sample new contact indices for trajectory mode.
+
+        IMPORTANT CONSTRAINT: Contact FINGERS must be consistent across all T frames
+        in each trajectory, but contact POINTS within those fingers CAN vary per frame.
+
+        This is achieved by:
+        1. Using the hierarchical sampler's preferred_links to define allowed fingers
+        2. Sampling independently for each frame (B*T samples)
+        3. The sampler ensures all samples come from the allowed fingers
 
         Args:
             hand_model: The hand model
             context: Optimization context
-            current_contacts: Current per-trajectory contacts, shape (B, n_contacts)
+            B: Batch size (number of trajectories)
+            T: Number of frames per trajectory
+            current_contacts_expanded: Current contacts, shape (B*T, n_contacts)
             device: Torch device
 
         Returns:
-            New per-trajectory contacts, shape (B, n_contacts)
+            New contacts, shape (B*T, n_contacts) - same contacts for all frames
+            in each trajectory (finger consistency maintained through sampler config)
         """
-        batch_size = current_contacts.shape[0]
-        n_contact = current_contacts.shape[1]
-        new_contacts = current_contacts.clone()
+        n_contact = current_contacts_expanded.shape[-1]
+        new_contacts = current_contacts_expanded.clone()
 
-        # Determine which contacts to switch
-        switch_mask = torch.rand(batch_size, n_contact, device=device) < self.switch_possibility
+        # Reshape to (B, T, n_contacts) for trajectory-level logic
+        current_per_traj = current_contacts_expanded.reshape(B, T, n_contact)
+        new_per_traj = new_contacts.reshape(B, T, n_contact)
+
+        # Determine which TRAJECTORIES to switch (decision made per trajectory, not per frame)
+        switch_mask = torch.rand(B, device=device) < self.switch_possibility
 
         if context.contact_sampler is not None:
-            batch_switch_mask = switch_mask.any(dim=1)
-            if batch_switch_mask.any():
-                n_switch = batch_switch_mask.sum().item()
-                new_samples = context.contact_sampler.sample(n_switch, n_contact)
-                switch_indices = batch_switch_mask.nonzero(as_tuple=True)[0]
-                for i, idx in enumerate(switch_indices):
-                    item_switch = switch_mask[idx]
-                    new_contacts[idx, item_switch] = new_samples[i, item_switch]
-        else:
-            # Fallback: uniform sampling
-            n_candidates = hand_model.n_contact_candidates
-            new_indices = torch.randint(n_candidates, size=(batch_size, n_contact), device=device)
-            new_contacts[switch_mask] = new_indices[switch_mask]
+            if switch_mask.any():
+                n_switch = switch_mask.sum().item()
+                switch_indices = switch_mask.nonzero(as_tuple=True)[0]
 
-        return new_contacts
+                # Sample NEW contacts for each frame in the switched trajectories
+                # The sampler's preferred_links ensures finger consistency
+                # Each frame gets independent samples, but all from the same allowed fingers
+                for i, traj_idx in enumerate(switch_indices):
+                    # Sample T sets of contacts for this trajectory
+                    # All will use the same allowed fingers (defined by sampler config)
+                    frame_samples = context.contact_sampler.sample(T, n_contact)
+                    new_per_traj[traj_idx] = frame_samples
+        else:
+            # Fallback: uniform sampling (no finger consistency guarantee)
+            n_candidates = hand_model.n_contact_candidates
+            if switch_mask.any():
+                switch_indices = switch_mask.nonzero(as_tuple=True)[0]
+                for traj_idx in switch_indices:
+                    new_per_traj[traj_idx] = torch.randint(n_candidates, size=(T, n_contact), device=device)
+
+        return new_per_traj.reshape(B * T, n_contact)
 
     def reset(self):
         """Reset optimizer state."""
