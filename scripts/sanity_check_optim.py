@@ -64,7 +64,6 @@ from graspqp.optim.costs.grasp import ContactDistanceCost, ForceClosureCost, Joi
 from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
 from graspqp.optim.optimizers.mala_star import MalaStarOptimizer
 from graspqp.optim.problem import OptimizationProblem
-# Import from NEW optimization framework
 from graspqp.optim.state import ReferenceTrajectory, TrajectoryState
 from graspqp.utils.profiler import get_profiler
 from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
@@ -519,115 +518,15 @@ def main():
     print(f"  step_size={args.step_size}, temp={args.starting_temperature}, decay={args.temperature_decay}")
 
     # =========================================================================
-    # 8. Compute initial energy - DEBUG: compare with fit.py
+    # 8. Compute initial energy
     # =========================================================================
-    print("\n" + "=" * 70)
-    print("DEBUG: Initial Energy Comparison")
-    print("=" * 70)
-
-    # DEBUG: Check hand_model state BEFORE any evaluation
-    print("\nhand_model state BEFORE evaluation:")
-    print(f"  hand_pose shape: {hand_model.hand_pose.shape}")
-    print(f"  hand_pose[:3, :5]: {hand_model.hand_pose[:3, :5]}")
-    print(f"  contact_point_indices shape: {hand_model.contact_point_indices.shape}")
-    print(f"  contact_point_indices[0]: {hand_model.contact_point_indices[0]}")
-    print(f"  n_contact: {hand_model.contact_point_indices.shape[1]}")
-
-    # Get surface points BEFORE any cost evaluation
-    surface_pts_before = hand_model.get_surface_points()
-    sdf_before, _ = object_model.cal_distance(surface_pts_before)
-    pen_before = torch.nn.functional.relu(-sdf_before).sum(dim=-1)
-    print(f"\nPenetration check BEFORE cost eval:")
-    print(f"  surface_points shape: {surface_pts_before.shape}")
-    print(f"  SDF min: {sdf_before.min().item():.4f}, max: {sdf_before.max().item():.4f}")
-    print(f"  Penetration (raw): {pen_before.mean().item():.4f}")
-
-    # First, compute using fit.py's calculate_energy for comparison
-    from graspqp.core import compute_prior_energy as fit_compute_prior_energy
-    from graspqp.core.energy import calculate_energy as fit_calculate_energy
-
-    fit_energy_names = [e for e in weight_dict.keys() if weight_dict[e] > 0.0 and e != "E_prior"]
-    fit_losses = fit_calculate_energy(
-        hand_model,
-        object_model,
-        energy_names=fit_energy_names,
-        energy_fnc=energy_fnc,
-        method="gendexgrasp",
-        svd_gain=args.w_svd,
-    )
-    if prior_pose is not None and weight_dict["E_prior"] > 0:
-        fit_losses["E_prior"] = fit_compute_prior_energy(hand_model.hand_pose, prior_pose, prior_weight=1.0)
-
-    fit_energy = sum(weight_dict[k] * v for k, v in fit_losses.items() if k in weight_dict)
-
-    print("\nfit.py's calculate_energy (UNWEIGHTED losses):")
-    for k, v in fit_losses.items():
-        print(f"  {k}: {v.mean().item():.4f} (weighted: {weight_dict.get(k, 0) * v.mean().item():.4f})")
-    print(f"  TOTAL (weighted sum): {fit_energy.mean().item():.2f}")
-
-    # DEBUG: Check hand_model state AFTER fit.py evaluation
-    print("\nhand_model state AFTER fit.py's calculate_energy:")
-    print(f"  hand_pose[:3, :5]: {hand_model.hand_pose[:3, :5]}")
-    print(f"  contact_point_indices[0]: {hand_model.contact_point_indices[0]}")
-
-    surface_pts_after_fit = hand_model.get_surface_points()
-    sdf_after_fit, _ = object_model.cal_distance(surface_pts_after_fit)
-    pen_after_fit = torch.nn.functional.relu(-sdf_after_fit).sum(dim=-1)
-    print(f"  Penetration (raw): {pen_after_fit.mean().item():.4f}")
-
-    # Now compute using our new framework
-    print("\n--- Calling problem.evaluate_all(state) ---")
     initial_costs = problem.evaluate_all(state)
     initial_energy = problem.total_energy(state)
-
-    # DEBUG: Check hand_model state AFTER new framework evaluation
-    print("\nhand_model state AFTER new framework's evaluate_all:")
-    print(f"  hand_pose[:3, :5]: {hand_model.hand_pose[:3, :5]}")
-    print(f"  contact_point_indices[0]: {hand_model.contact_point_indices[0]}")
-
-    surface_pts_after_new = hand_model.get_surface_points()
-    sdf_after_new, _ = object_model.cal_distance(surface_pts_after_new)
-    pen_after_new = torch.nn.functional.relu(-sdf_after_new).sum(dim=-1)
-    print(f"  Penetration (raw): {pen_after_new.mean().item():.4f}")
-
-    print("\nNew framework costs (WEIGHTED - need to divide by weight):")
-    cost_name_map = {
-        "contact_distance": ("E_dis", args.w_dis),
-        "force_closure": ("E_fc", args.w_fc),
-        "penetration": ("E_pen", args.w_pen),
-        "self_penetration": ("E_spen", args.w_spen),
-        "joint_limits": ("E_joints", args.w_joints),
-        "prior_pose": ("E_prior", args.w_prior),
-    }
-    for cost_name, weighted_value in initial_costs.items():
-        fit_name, weight = cost_name_map.get(cost_name, (cost_name, 1.0))
-        unweighted = weighted_value.mean().item() / weight if weight > 0 else 0
-        print(f"  {cost_name} ({fit_name}): unweighted={unweighted:.4f}, weighted={weighted_value.mean().item():.4f}")
-    print(f"  TOTAL: {initial_energy.mean().item():.2f}")
-
-    print("\nDifference (fit.py - new framework):")
-    for cost_name, weighted_value in initial_costs.items():
-        fit_name, weight = cost_name_map.get(cost_name, (cost_name, 1.0))
-        new_unweighted = weighted_value.mean().item() / weight if weight > 0 else 0
-        fit_unweighted = fit_losses.get(fit_name, torch.zeros(1)).mean().item()
-        diff = fit_unweighted - new_unweighted
-        print(f"  {fit_name}: fit={fit_unweighted:.4f}, new={new_unweighted:.4f}, diff={diff:.4f}")
-    print(f"  TOTAL diff: {fit_energy.mean().item() - initial_energy.mean().item():.2f}")
-    print("=" * 70)
 
     # Store initial energy stats for metrics
     initial_stats = collect_energy_stats(initial_costs, initial_energy, weight_dict)
 
-    print(f"\nInitial energy (new framework): {initial_energy.mean().item():.2f}")
-    print(f"  Breakdown: {', '.join(f'{k}={v.mean().item():.2f}' for k, v in initial_costs.items())}")
-
-    # DEBUG: Enable verbose mode in optimizer
-    optimizer._debug = True
-
-    # Gradient comparison skipped - causes double backward issues
-    # The key finding: initial energy matches perfectly
-    print("\n✓ Initial energy matches between fit.py and new framework!")
-    print("=" * 50)
+    print(f"\nInitial energy: {initial_energy.mean().item():.2f} (best={initial_energy.min().item():.2f})")
 
     print(f"\nStarting optimization...")
 
@@ -662,20 +561,11 @@ def main():
             if optimizer._current_energy is not None:
                 current_energy = optimizer._current_energy.clone()
 
-            # Get current energy for logging
-            if step % 100 == 0 or step == 1:
+            # Periodic logging
+            if step % 100 == 0:
                 with profiler.section("logging"):
-                    # Save gradient before logging (evaluate_all may clear it via set_parameters)
-                    saved_grad = hand_model.hand_pose.grad.clone() if hand_model.hand_pose.grad is not None else None
-
-                    current_costs = problem.evaluate_all(state)
-                    log_energy = problem.total_energy(state)
-                    breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in current_costs.items())
-                    print(f"Step {step}: total={log_energy.mean().item():.2f} | {breakdown}")
-
-                    # Restore gradient
-                    if saved_grad is not None:
-                        hand_model.hand_pose.grad = saved_grad
+                    log_energy = current_energy
+                    print(f"Step {step}: energy={log_energy.mean().item():.2f} (best={log_energy.min().item():.2f})")
 
         profiler.step_done()
 
