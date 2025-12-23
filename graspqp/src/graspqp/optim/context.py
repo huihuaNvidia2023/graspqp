@@ -256,8 +256,13 @@ class OptimizationContext:
 
         if cached_ptr != current_ptr:
             if self._skip_set_parameters:
-                # In gradient mode: just recompute FK without set_parameters
-                # This preserves gradient flow through hand_pose
+                # In gradient mode: update translation, rotation, and FK
+                # without calling set_parameters (which clones the tensor).
+                # This preserves gradient flow through hand_pose.
+                from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
+
+                self.hand_model.global_translation = flat_hand[:, :3]
+                self.hand_model.global_rotation = robust_compute_rotation_matrix_from_ortho6d(flat_hand[:, 3:9])
                 self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
             else:
                 # Normal mode: full set_parameters

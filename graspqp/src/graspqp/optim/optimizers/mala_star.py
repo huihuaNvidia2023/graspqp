@@ -67,6 +67,7 @@ class MalaStarOptimizer(Optimizer):
         self._per_batch_step: Optional[Tensor] = None
         self._current_energy: Optional[Tensor] = None
         self._initialized: bool = False
+        self._debug: bool = False  # Set to True for verbose output
 
     def step(
         self,
@@ -94,18 +95,30 @@ class MalaStarOptimizer(Optimizer):
             self._ema_grad = torch.zeros(D_hand, dtype=torch.float, device=device)
 
         # =====================================================================
-        # First call: just compute initial gradient, don't do proposal yet
+        # First call: compute initial energy and gradient (like fit.py's pre-loop)
+        # fit.py does: backward() then zero_grad() before the loop
+        # Then the first loop iteration uses zero grad for proposal
         # =====================================================================
         if not self._initialized:
             self._compute_energy_and_grad(problem, hand_model)
+            if self._debug:
+                print(f"\n[MalaStar Init] energy={self._current_energy.mean().item():.2f}")
+                print(f"  grad norm={hand_model.hand_pose.grad.norm().item():.4f}")
+            # Zero gradient like fit.py's zero_grad() before the loop
+            if hand_model.hand_pose.grad is not None:
+                hand_model.hand_pose.grad.zero_()
             self._initialized = True
-            # Return state unchanged for first call
-            return state
+            # DON'T return early - continue to do the full step with zero gradient
+            # This matches fit.py where first iteration still resamples contacts
 
         # =====================================================================
         # 1. Try step: propose new parameters using gradient
         # =====================================================================
-        # Compute step size with decay
+        # Increment step counter FIRST (like fit.py's try_step does at the end,
+        # but accept_step uses the incremented value)
+        self._per_batch_step += 1
+
+        # Compute step size with decay (uses incremented step, like fit.py)
         s = self.step_size * (self.temperature_decay ** (self._per_batch_step // self.stepsize_period))
         step_size = s.unsqueeze(-1)  # (B, 1)
 
@@ -148,10 +161,11 @@ class MalaStarOptimizer(Optimizer):
             new_contact_indices = self._sample_contacts(hand_model, problem.context, device)
 
         # =====================================================================
-        # 3. Save old state
+        # 3. Save old state (pose, contacts, contact_points, energy)
         # =====================================================================
         old_hand_pose = hand_model.hand_pose.detach().clone()
         old_contact_indices = hand_model.contact_point_indices.clone()
+        old_contact_points = hand_model.contact_points.clone()
         old_energy = self._current_energy.clone()
 
         # =====================================================================
@@ -175,17 +189,31 @@ class MalaStarOptimizer(Optimizer):
             accept = alpha < torch.exp((old_energy - new_energy) / temperature)
             reject = ~accept
 
-            # Restore rejected states
+            if self._debug and self._step_count < 5:
+                print(f"\n[MalaStar Step {self._step_count}]")
+                print(f"  old_energy={old_energy.mean().item():.2f}, new_energy={new_energy.mean().item():.2f}")
+                print(f"  temperature={temperature.mean().item():.4f}, accept_rate={accept.float().mean().item():.2f}")
+                print(f"  step_size={s.mean().item():.6f}, EMA={self._ema_grad.mean().item():.6f}")
+                print(f"  grad norm (before)={grad.norm().item():.4f}")
+                if hand_model.hand_pose.grad is not None:
+                    new_grad = hand_model.hand_pose.grad
+                    print(f"  grad norm (after)={new_grad.norm().item():.4f}")
+                    print(f"  grad trans={new_grad[:,:3].norm().item():.2f}, rot={new_grad[:,3:9].norm().item():.2f}, joints={new_grad[:,9:].norm().item():.2f}")
+                print(f"  hand_pose change={((hand_model.hand_pose - old_hand_pose)**2).sum(-1).sqrt().mean().item():.6f}")
+
+            # Restore rejected states (pose, contacts, contact_points, energy)
+            # NOTE: Do NOT restore gradients! fit.py keeps gradients from proposed state
+            # for ALL samples (accepted and rejected). This is key for proper convergence.
             if reject.any():
                 hand_model.hand_pose[reject] = old_hand_pose[reject]
                 hand_model.contact_point_indices[reject] = old_contact_indices[reject]
+                hand_model.contact_points[reject] = old_contact_points[reject]
                 self._current_energy[reject] = old_energy[reject]
 
             # Recompute FK for consistency
             hand_model.current_status = hand_model.fk(hand_model.hand_pose[:, 9:])
 
-        # Increment step counter
-        self._per_batch_step += 1
+        # Step counter was already incremented at the start of this function
         self._step_count += 1
 
         # =====================================================================

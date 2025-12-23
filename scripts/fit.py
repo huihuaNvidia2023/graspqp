@@ -542,6 +542,17 @@ for step in tqdm(range(1, args.n_iter + 1), desc="optimizing"):
                     args.z_score_threshold,
                 )
 
+                # DEBUG: Print step info for first few steps
+                if step <= 5:
+                    print(f"\n[fit.py Step {step}]")
+                    print(f"  old_energy={energy.mean().item():.2f}, new_energy={new_energy.mean().item():.2f}")
+                    print(f"  temperature={t.mean().item():.4f}, accept_rate={accept.float().mean().item():.2f}")
+                    print(f"  step_size={s.mean().item():.6f}, EMA={optimizer.ema_grad_hand_pose.mean().item():.6f}")
+                    if hand_model.hand_pose.grad is not None:
+                        g = hand_model.hand_pose.grad
+                        print(f"  grad norm={g.norm().item():.4f}")
+                        print(f"  grad trans={g[:,:3].norm().item():.2f}, rot={g[:,3:9].norm().item():.2f}, joints={g[:,9:].norm().item():.2f}")
+
                 energy[accept] = new_energy[accept]
                 for loss_name, loss_value in new_energies.items():
                     if loss_name not in weight_dict:

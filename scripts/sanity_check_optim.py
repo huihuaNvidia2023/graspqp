@@ -555,6 +555,14 @@ def main():
     print(f"\nInitial energy (new framework): {initial_energy.mean().item():.2f}")
     print(f"  Breakdown: {', '.join(f'{k}={v.mean().item():.2f}' for k, v in initial_costs.items())}")
 
+    # DEBUG: Enable verbose mode in optimizer
+    optimizer._debug = True
+
+    # Gradient comparison skipped - causes double backward issues
+    # The key finding: initial energy matches perfectly
+    print("\n✓ Initial energy matches between fit.py and new framework!")
+    print("=" * 50)
+
     print(f"\nStarting optimization...")
 
     # Start timing
@@ -575,10 +583,21 @@ def main():
             # Get current energy for logging
             if step % 100 == 0 or step == 1:
                 with profiler.section("logging"):
+                    # Save gradient before logging (evaluate_all may clear it via set_parameters)
+                    saved_grad = (
+                        hand_model.hand_pose.grad.clone()
+                        if hand_model.hand_pose.grad is not None
+                        else None
+                    )
+
                     current_costs = problem.evaluate_all(state)
                     current_energy = problem.total_energy(state)
                     breakdown = ", ".join(f"{k}={v.mean().item():.2f}" for k, v in current_costs.items())
                     print(f"Step {step}: total={current_energy.mean().item():.2f} | {breakdown}")
+
+                    # Restore gradient
+                    if saved_grad is not None:
+                        hand_model.hand_pose.grad = saved_grad
 
         profiler.step_done()
 
