@@ -921,9 +921,26 @@ def _show_dir(dir, args, device, origin=(0, 0)):
     batch_size = len(hand_params)
     asset_path = os.path.dirname(dir)
     root_path = os.path.dirname(asset_path)
+
+    # Try to get object_code and data_root_path from metadata first
+    metadata = checkpoint_data.get("metadata", {})
+    object_code = metadata.get("object_code", None)
+
     if args.obj_path is not None:
         root_path = args.obj_path
-        asset_path = args.obj_path
+        if object_code is None:
+            # Infer from directory structure: .../objects/<object_code>/grasp_predictions/...
+            dir_parts = os.path.normpath(dir).split(os.sep)
+            if "grasp_predictions" in dir_parts:
+                gp_idx = dir_parts.index("grasp_predictions")
+                if gp_idx > 0:
+                    object_code = dir_parts[gp_idx - 1]
+    elif object_code is None:
+        object_code = os.path.basename(asset_path)
+
+    # Use data_root_path from metadata if available
+    if metadata.get("data_root_path"):
+        root_path = metadata["data_root_path"]
 
     object_model = ObjectModel(
         data_root_path=root_path,
@@ -932,7 +949,6 @@ def _show_dir(dir, args, device, origin=(0, 0)):
         device=device,
         scale=args.scale,
     )
-    object_code = os.path.basename(asset_path)
     object_model.initialize([object_code])
 
     n_envs = min(args.max_grasps, len(joint_states))

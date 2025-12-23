@@ -46,6 +46,7 @@ from graspqp.optim.costs.grasp import ContactDistanceCost, ForceClosureCost, Joi
 from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
 from graspqp.optim.costs.reference import ReferenceTrackingCost
 from graspqp.optim.costs.temporal import VelocitySmoothnessCost
+from graspqp.optim.optimizers.mala_star import MalaStarOptimizer
 from graspqp.optim.optimizers.mala_star_trajectory import MalaStarTrajectoryOptimizer
 from graspqp.optim.optimizers.torch_optim import AdamOptimizer
 from graspqp.optim.problem import OptimizationProblem
@@ -63,31 +64,32 @@ def parse_args():
     parser.add_argument("--n_iter", default=200, type=int)
     parser.add_argument("--n_frames", default=2, type=int, help="Number of frames (T)")
 
-    # Weights (following design doc recommendations for video post-processing)
-    # PRIMARY: Stay close to reference trajectory (the "anchor")
-    parser.add_argument("--w_ref", default=100.0, type=float, help="Reference tracking weight (PRIMARY)")
-    # HARD CONSTRAINTS: Physical validity
-    parser.add_argument("--w_pen", default=1000.0, type=float, help="Penetration weight (HARD)")
-    parser.add_argument("--w_spen", default=100.0, type=float, help="Self-penetration weight")
-    # SOFT CONSTRAINTS: Grasp quality
-    parser.add_argument("--w_dis", default=50.0, type=float, help="Contact distance weight")
-    parser.add_argument("--w_fc", default=10.0, type=float, help="Force closure weight")
+    # Weights - DEFAULT to sanity_check_optim.py values for baseline comparison
+    # These match fit.py / sanity_check_optim.py defaults
+    parser.add_argument("--w_dis", default=100.0, type=float, help="Contact distance weight")
+    parser.add_argument("--w_fc", default=1.0, type=float, help="Force closure weight")
+    parser.add_argument("--w_pen", default=100.0, type=float, help="Penetration weight")
+    parser.add_argument("--w_spen", default=10.0, type=float, help="Self-penetration weight")
     parser.add_argument("--w_joints", default=1.0, type=float, help="Joint limits weight")
-    # TEMPORAL: Smoothness
-    parser.add_argument("--w_smooth", default=1.0, type=float, help="Velocity smoothness weight")
-    # Legacy (optional)
-    parser.add_argument("--w_prior", default=0.0, type=float, help="Prior pose weight (deprecated, use w_ref)")
+    parser.add_argument("--w_prior", default=0.0, type=float, help="Prior pose weight")
     parser.add_argument("--w_svd", default=0.1, type=float)
+    # Trajectory-specific (disabled by default for sanity check)
+    parser.add_argument("--w_ref", default=0.0, type=float, help="Reference tracking weight (trajectory only)")
+    parser.add_argument("--w_smooth", default=0.0, type=float, help="Velocity smoothness weight (trajectory only)")
 
-    # Optimizer settings
+    # Optimizer settings - DEFAULT to mala to match sanity_check_optim.py
     parser.add_argument(
         "--optimizer",
-        default="adam",
+        default="mala",
         type=str,
         choices=["adam", "mala"],
-        help="Optimizer: 'adam' for refinement (recommended), 'mala' for exploration",
+        help="Optimizer: 'mala' for grasp synthesis (matches sanity_check), 'adam' for refinement",
     )
     parser.add_argument("--lr", default=0.005, type=float, help="Learning rate for Adam")
+    parser.add_argument(
+        "--min_grad_norm", default=10.0, type=float, help="Minimum gradient norm to prevent vanishing (0=disabled)"
+    )
+    parser.add_argument("--switch_possibility", default=0.4, type=float, help="Contact switch probability")
     # MALA* settings (only used if --optimizer mala)
     parser.add_argument("--starting_temperature", default=18.0, type=float)
     parser.add_argument("--temperature_decay", default=0.95, type=float)
@@ -303,6 +305,8 @@ def export_trajectory(
                 "n_frames": T,
                 "hand_name": args.hand_name,
                 "prior_file": args.prior_file,
+                "object_code": args.object_code_list[asset_idx],
+                "data_root_path": args.data_root_path,
             },
         }
 
@@ -372,53 +376,103 @@ def main():
     # 3. Create TrajectoryState
     # =========================================================================
     D_obj = 7  # pos(3) + quat(4)
-    object_at_origin = torch.zeros(total_batch_size, T, D_obj, device=device)
-    object_at_origin[:, :, 6] = 1.0  # Identity quaternion (w=1)
 
-    state = TrajectoryState(
-        hand_states=reference_hand.clone(),
-        object_states=object_at_origin,
-        dt=0.1,
-    )
-    print(f"\nTrajectoryState: B={state.B}, T={state.T}, D_hand={state.D_hand}")
+    # Determine if we're in "sanity check" mode (no cross-frame costs)
+    sanity_check_mode = args.w_ref == 0 and args.w_smooth == 0
+
+    if sanity_check_mode:
+        # SANITY CHECK MODE: Flatten to B*T independent samples with T=1
+        # This makes the problem identical to sanity_check_optim.py with B*T batches
+        flat_batch_size = total_batch_size * T
+        object_at_origin = torch.zeros(flat_batch_size, 1, D_obj, device=device)
+        object_at_origin[:, :, 6] = 1.0  # Identity quaternion (w=1)
+
+        # Flatten reference: (B, T, D) -> (B*T, 1, D)
+        flat_reference_hand = reference_hand.reshape(flat_batch_size, 1, -1)
+
+        state = TrajectoryState(
+            hand_states=flat_reference_hand.clone(),
+            object_states=object_at_origin,
+            dt=0.1,
+        )
+        print(f"\nSANITY CHECK MODE: Flattened to B*T={flat_batch_size} independent samples")
+        print(f"TrajectoryState: B={state.B}, T={state.T}, D_hand={state.D_hand}")
+    else:
+        # TRAJECTORY MODE: Keep (B, T, D) structure
+        object_at_origin = torch.zeros(total_batch_size, T, D_obj, device=device)
+        object_at_origin[:, :, 6] = 1.0  # Identity quaternion (w=1)
+
+        state = TrajectoryState(
+            hand_states=reference_hand.clone(),
+            object_states=object_at_origin,
+            dt=0.1,
+        )
+        print(f"\nTRAJECTORY MODE: B={state.B}, T={state.T}")
+        print(f"TrajectoryState: B={state.B}, T={state.T}, D_hand={state.D_hand}")
 
     # =========================================================================
     # 4. Initialize contact indices
     # =========================================================================
-    # Sample initial contacts (fixed for all frames, but expanded to B*T for FK)
-    # Shape: (B, n_contacts) - same contacts for all T frames in each trajectory
-    initial_contacts_per_traj = torch.randint(
-        hand_model.n_contact_candidates,
-        size=(total_batch_size, args.n_contact),
-        device=device,
-    )
+    if sanity_check_mode:
+        # SANITY CHECK MODE: Each of the B*T samples has its own contacts
+        flat_batch_size = total_batch_size * T
+        initial_contacts = torch.randint(
+            hand_model.n_contact_candidates,
+            size=(flat_batch_size, args.n_contact),
+            device=device,
+        )
+        # Flatten hand states for initialization: (B, T, D) -> (B*T, D)
+        flat_reference = reference_hand.reshape(flat_batch_size, -1)
 
-    # Expand to (B*T, n_contacts) for batched FK across all frames
-    # Each trajectory uses the same contacts for all its frames
-    initial_contacts_expanded = (
-        initial_contacts_per_traj.unsqueeze(1)
-        .expand(total_batch_size, T, args.n_contact)
-        .reshape(total_batch_size * T, args.n_contact)
-    )
+        # Set hand model with B*T samples
+        hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts)
+        print(f"  Hand model configured for {flat_batch_size} independent samples")
+    else:
+        # TRAJECTORY MODE: Same contacts for all frames in each trajectory
+        # Shape: (B, n_contacts) - same contacts for all T frames in each trajectory
+        initial_contacts_per_traj = torch.randint(
+            hand_model.n_contact_candidates,
+            size=(total_batch_size, args.n_contact),
+            device=device,
+        )
+        # Expand to (B*T, n_contacts) for batched FK across all frames
+        initial_contacts = (
+            initial_contacts_per_traj.unsqueeze(1)
+            .expand(total_batch_size, T, args.n_contact)
+            .reshape(total_batch_size * T, args.n_contact)
+        )
+        # Flatten hand states for initialization: (B, T, D) -> (B*T, D)
+        flat_reference = reference_hand.reshape(total_batch_size * T, -1)
 
-    # Flatten hand states for initialization: (B, T, D) -> (B*T, D)
-    flat_reference = reference_hand.reshape(total_batch_size * T, -1)
-
-    # Set hand model with all B*T samples
-    hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts_expanded)
-    print(f"  Hand model configured for {total_batch_size * T} samples (B*T)")
+        # Set hand model with all B*T samples
+        hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts)
+        print(f"  Hand model configured for {total_batch_size * T} samples (B*T)")
 
     # =========================================================================
     # 5. Create OptimizationContext
     # =========================================================================
-    reference = ReferenceTrajectory(
-        hand_states=reference_hand,
-        object_states=object_at_origin,
-        contact_fingers=None,
-        n_contacts=args.n_contact,
-        hand_type=args.hand_name,
-        dt=0.1,
-    )
+    if sanity_check_mode:
+        # SANITY CHECK MODE: Reference has B*T batches, T=1
+        flat_batch_size = total_batch_size * T
+        flat_reference_hand = reference_hand.reshape(flat_batch_size, 1, -1)
+        reference = ReferenceTrajectory(
+            hand_states=flat_reference_hand,
+            object_states=object_at_origin,
+            contact_fingers=None,
+            n_contacts=args.n_contact,
+            hand_type=args.hand_name,
+            dt=0.1,
+        )
+    else:
+        # TRAJECTORY MODE: Reference has B batches, T frames
+        reference = ReferenceTrajectory(
+            hand_states=reference_hand,
+            object_states=object_at_origin,
+            contact_fingers=None,
+            n_contacts=args.n_contact,
+            hand_type=args.hand_name,
+            dt=0.1,
+        )
 
     context = OptimizationContext(
         hand_model=hand_model,
@@ -428,8 +482,8 @@ def main():
         profiler=profiler,
     )
 
-    # Set expanded contact indices in context for cost evaluation
-    context.set_contact_indices(initial_contacts_expanded)
+    # Set contact indices in context for cost evaluation
+    context.set_contact_indices(initial_contacts)
 
     # =========================================================================
     # 6. Create OptimizationProblem
@@ -437,43 +491,8 @@ def main():
     problem = OptimizationProblem(context, profiler=profiler)
 
     # -------------------------------------------------------------------------
-    # PRIMARY COST: Reference tracking - stay close to video trajectory
-    # This is the "anchor" that keeps the optimization grounded
-    # -------------------------------------------------------------------------
-    if args.w_ref > 0:
-        problem.add_cost(
-            ReferenceTrackingCost(
-                name="reference_tracking",
-                weight=args.w_ref,
-                config={
-                    "hand_weight": 1.0,
-                    "object_weight": 0.0,  # Object is fixed at origin for now
-                    "hand_position_weight": 10.0,  # Wrist position important
-                    "hand_rotation_weight": 5.0,  # Wrist orientation
-                    "finger_weight": 1.0,  # Fingers can deviate more
-                },
-            )
-        )
-
-    # -------------------------------------------------------------------------
-    # HARD CONSTRAINTS: Physical validity
-    # -------------------------------------------------------------------------
-    problem.add_cost(
-        PenetrationCost(
-            name="penetration",
-            weight=args.w_pen,
-        )
-    )
-
-    problem.add_cost(
-        SelfPenetrationCost(
-            name="self_penetration",
-            weight=args.w_spen,
-        )
-    )
-
-    # -------------------------------------------------------------------------
-    # SOFT CONSTRAINTS: Grasp quality
+    # CORE COSTS (same as sanity_check_optim.py for baseline comparison)
+    # Each frame is treated INDEPENDENTLY - no cross-frame interaction
     # -------------------------------------------------------------------------
     problem.add_cost(
         ContactDistanceCost(
@@ -499,15 +518,59 @@ def main():
     problem.add_cost(fc_cost)
 
     problem.add_cost(
+        PenetrationCost(
+            name="penetration",
+            weight=args.w_pen,
+        )
+    )
+
+    problem.add_cost(
+        SelfPenetrationCost(
+            name="self_penetration",
+            weight=args.w_spen,
+        )
+    )
+
+    problem.add_cost(
         JointLimitCost(
             name="joint_limits",
             weight=args.w_joints,
         )
     )
 
+    # Prior pose cost (per-frame, same as sanity_check_optim.py)
+    if args.w_prior > 0:
+        prior_cost = PriorPoseCost(
+            name="prior_pose",
+            weight=args.w_prior,
+        )
+        if sanity_check_mode:
+            # SANITY CHECK MODE: (B*T, D) - each sample has its own prior
+            prior_flat = reference_hand.reshape(total_batch_size * T, -1)
+        else:
+            # TRAJECTORY MODE: (B*T, D) - flatten across frames
+            prior_flat = reference_hand.reshape(total_batch_size * T, -1)
+        prior_cost.set_prior_pose(prior_flat)
+        problem.add_cost(prior_cost)
+
     # -------------------------------------------------------------------------
-    # TEMPORAL COSTS: Smoothness (for trajectory, T > 1)
+    # TRAJECTORY-SPECIFIC COSTS (disabled by default for sanity check)
     # -------------------------------------------------------------------------
+    if args.w_ref > 0:
+        problem.add_cost(
+            ReferenceTrackingCost(
+                name="reference_tracking",
+                weight=args.w_ref,
+                config={
+                    "hand_weight": 1.0,
+                    "object_weight": 0.0,
+                    "hand_position_weight": 10.0,
+                    "hand_rotation_weight": 5.0,
+                    "finger_weight": 1.0,
+                },
+            )
+        )
+
     if T > 1 and args.w_smooth > 0:
         problem.add_cost(
             VelocitySmoothnessCost(
@@ -516,19 +579,6 @@ def main():
             )
         )
 
-    # -------------------------------------------------------------------------
-    # LEGACY: Prior pose cost (deprecated, use reference_tracking instead)
-    # -------------------------------------------------------------------------
-    if args.w_prior > 0:
-        prior_cost = PriorPoseCost(
-            name="prior_pose",
-            weight=args.w_prior,
-        )
-        # Flatten reference to (B*T, D) for prior
-        prior_flat = reference_hand.reshape(total_batch_size * T, -1)
-        prior_cost.set_prior_pose(prior_flat)
-        problem.add_cost(prior_cost)
-
     print("\nCosts configured:")
     for name, cost in problem.costs.items():
         print(f"  {name}: weight={cost.weight}")
@@ -536,21 +586,45 @@ def main():
     # =========================================================================
     # 7. Create Optimizer
     # =========================================================================
-    debug_mode = True  # Enable debugging to trace gradients
+    # Determine if we're in "sanity check" mode (no cross-frame costs)
+    sanity_check_mode = args.w_ref == 0 and args.w_smooth == 0
 
     if args.optimizer == "adam":
-        optimizer = AdamOptimizer(lr=args.lr, debug=debug_mode)
-        print(f"\nOptimizer: AdamOptimizer (recommended for refinement)")
-        print(f"  lr={args.lr}, debug={debug_mode}")
-
-        # IMPORTANT: Initialize Adam with persistent parameters
-        print(f"  Initializing Adam with persistent parameters...")
+        optimizer = AdamOptimizer(
+            lr=args.lr,
+            min_grad_norm=args.min_grad_norm,
+            debug=True,
+        )
+        print(f"\nOptimizer: AdamOptimizer")
+        print(f"  lr={args.lr}, min_grad_norm={args.min_grad_norm}")
+        # Initialize Adam with persistent parameters
         state = optimizer.initialize(state)
-        print(f"  Adam initialized successfully")
+    elif sanity_check_mode:
+        # SANITY CHECK MODE: Use MalaStarOptimizer (known working)
+        # Treat B*T as independent samples, exactly like sanity_check_optim.py
+        optimizer = MalaStarOptimizer(
+            fix_contacts=False,  # Allow contact switching (like sanity_check)
+            switch_possibility=args.switch_possibility,
+            starting_temperature=args.starting_temperature,
+            temperature_decay=args.temperature_decay,
+            annealing_period=args.annealing_period,
+            step_size=args.step_size,
+            stepsize_period=args.stepsize_period,
+            mu=args.mu,
+            clip_grad=args.clip_grad,
+            batch_size_per_object=args.batch_size * T,  # Total samples = B*T
+            profiler=profiler,
+        )
+        print(f"\nOptimizer: MalaStarOptimizer (SANITY CHECK MODE - B*T independent samples)")
+        print(f"  step_size={args.step_size}, temp={args.starting_temperature}")
+        print(f"  switch_possibility={args.switch_possibility}")
+        print(f"  Treating {total_batch_size}×{T} = {total_batch_size * T} as independent samples")
     else:
+        # TRAJECTORY MODE: Use MalaStarTrajectoryOptimizer
+        # Allow contact switching like in sanity check mode for better exploration
         optimizer = MalaStarTrajectoryOptimizer(
-            fix_contacts=True,  # Keep contacts fixed for trajectory
-            switch_possibility=0.0,
+            fix_contacts=False,  # Allow contact switching for exploration
+            switch_possibility=args.switch_possibility,
             starting_temperature=args.starting_temperature,
             temperature_decay=args.temperature_decay,
             annealing_period=args.annealing_period,
@@ -561,8 +635,9 @@ def main():
             batch_size_per_object=args.batch_size,
             profiler=profiler,
         )
-        print(f"\nOptimizer: MalaStarTrajectoryOptimizer")
+        print(f"\nOptimizer: MalaStarTrajectoryOptimizer (TRAJECTORY MODE)")
         print(f"  step_size={args.step_size}, temp={args.starting_temperature}")
+        print(f"  switch_possibility={args.switch_possibility} (contact switching enabled)")
 
     # =========================================================================
     # 8. Initial evaluation (no_grad to avoid graph conflict with optimizer)
@@ -582,6 +657,12 @@ def main():
     print(f"\nStarting optimization...")
     start_time = time.perf_counter()
 
+    # Track global best solution across all steps
+    global_best_energy = float("inf")
+    global_best_state = None
+    global_best_contacts = None
+    global_best_step = 0
+
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
         with profiler.section("step"):
             context.clear_step_cache()
@@ -592,11 +673,32 @@ def main():
                 with torch.no_grad():
                     context.clear_step_cache()
                     log_energy = problem.total_energy(state)
-                print(f"  Step {step}: mean={log_energy.mean():.2f}, best={log_energy.min():.2f}")
+
+                current_best = log_energy.min().item()
+
+                # Track global best (save both state AND contact indices)
+                if current_best < global_best_energy:
+                    global_best_energy = current_best
+                    global_best_state = state.clone()
+                    global_best_contacts = hand_model.contact_point_indices.clone()
+                    global_best_step = step
+
+                print(
+                    f"  Step {step}: mean={log_energy.mean():.2f}, best={current_best:.2f}, global_best={global_best_energy:.2f} (step {global_best_step})"
+                )
 
         profiler.step_done()
 
     total_time = time.perf_counter() - start_time
+
+    # Use global best state for final output
+    if global_best_state is not None:
+        print(f"\nUsing global best from step {global_best_step} (energy={global_best_energy:.2f})")
+        state = global_best_state
+        # Restore contact indices
+        context.set_contact_indices(global_best_contacts)
+        flat_hand = state.hand_states.reshape(-1, state.D_hand)
+        hand_model.set_parameters(flat_hand, contact_point_indices=global_best_contacts)
 
     # =========================================================================
     # 10. Final results

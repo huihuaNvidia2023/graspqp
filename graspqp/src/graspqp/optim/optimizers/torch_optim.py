@@ -30,6 +30,7 @@ class AdamOptimizer(Optimizer):
         eps: Epsilon for numerical stability (default: 1e-8)
         weight_decay: L2 regularization (default: 0)
         debug: Enable debug output (default: False)
+        min_grad_norm: Minimum gradient norm to prevent vanishing (default: 0, disabled)
     """
 
     def __init__(
@@ -39,6 +40,7 @@ class AdamOptimizer(Optimizer):
         eps: float = 1e-8,
         weight_decay: float = 0,
         debug: bool = False,
+        min_grad_norm: float = 0.0,
         config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(config)
@@ -47,6 +49,7 @@ class AdamOptimizer(Optimizer):
         self.eps = eps
         self.weight_decay = weight_decay
         self.debug = debug
+        self.min_grad_norm = min_grad_norm
 
         # Persistent parameters (set by initialize())
         self._hand_param: Optional[Tensor] = None
@@ -124,6 +127,20 @@ class AdamOptimizer(Optimizer):
         finally:
             # Restore normal mode
             problem.context._skip_set_parameters = False
+
+        # Apply gradient scaling if min_grad_norm is set
+        hand_grad = self._hand_param.grad
+        if hand_grad is not None and self.min_grad_norm > 0:
+            grad_norm = hand_grad.norm()
+            if grad_norm < self.min_grad_norm and grad_norm > 1e-10:
+                scale = self.min_grad_norm / grad_norm
+                self._hand_param.grad = hand_grad * scale
+                if self._object_param.grad is not None:
+                    self._object_param.grad = self._object_param.grad * scale
+                if self.debug and self._step_count % 10 == 0:
+                    print(
+                        f"  [GradScale] Scaled gradient by {scale:.2f}x (norm {grad_norm:.4f} -> {self.min_grad_norm})"
+                    )
 
         if self.debug and self._step_count % 10 == 0:
             hand_grad = self._hand_param.grad
