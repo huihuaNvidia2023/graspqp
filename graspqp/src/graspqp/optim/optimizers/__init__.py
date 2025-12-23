@@ -4,6 +4,7 @@ Optimizers for trajectory optimization.
 
 from .base import Optimizer
 from .mala_star import MalaStarOptimizer
+from .mala_star_trajectory import MalaStarTrajectoryOptimizer
 from .torch_optim import AdamOptimizer, LBFGSOptimizer, SGDOptimizer
 
 __all__ = [
@@ -12,4 +13,5 @@ __all__ = [
     "SGDOptimizer",
     "LBFGSOptimizer",
     "MalaStarOptimizer",
+    "MalaStarTrajectoryOptimizer",
 ]

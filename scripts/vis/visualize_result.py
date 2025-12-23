@@ -509,15 +509,218 @@ def _flatten(arr):
     return data
 
 
-def _show_dir(dir, args, device, origin=(0, 0)):
-    data_path = os.path.join(dir, args.hand_name)
-    glob_pattern = os.path.join(data_path, args.num_contacts, args.energy, args.grasp_type, "*.dexgrasp.pt")
+def _show_trajectory(checkpoint_data, args, device, hand_model, object_model, origin=(0, 0)):
+    """
+    Visualize trajectory data (T > 1 frames).
 
-    print(f"Loading from {glob_pattern}")
-    if len(glob.glob(glob_pattern, recursive=True)) == 0:
-        print(f"No files found for pattern {glob_pattern}")
-        return None
-    checkpoint_path = sorted(glob.glob(glob_pattern, recursive=True), key=os.path.getmtime)[-1]
+    Handles checkpoint files that contain 'trajectory' key with multi-frame data.
+    Visualizes all frames side-by-side with temporal offset.
+
+    Args:
+        checkpoint_data: Loaded checkpoint with trajectory field
+        args: Command line arguments
+        device: Torch device
+        hand_model: Initialized hand model
+        object_model: Initialized object model
+        origin: (x, y) origin offset
+
+    Returns:
+        List of plotly traces for all frames
+    """
+    trajectory = checkpoint_data["trajectory"]
+    T = trajectory["n_frames"]
+    dt = trajectory.get("dt", 0.1)
+    hand_states = trajectory["hand_states"].to(device)  # (B, T, D)
+    object_states = trajectory.get("object_states", None)
+
+    energies = checkpoint_data.get("values", torch.zeros(hand_states.shape[0]))
+    contact_idx = checkpoint_data.get("contact_idx", None)
+
+    B = hand_states.shape[0]
+    n_envs = min(args.max_grasps, B)
+
+    print(f"  Trajectory visualization: T={T} frames, B={B} trajectories")
+    print(f"  Showing {n_envs} trajectories, each with {T} frames")
+
+    # Sort by energy
+    if energies is not None and len(energies) > 0:
+        energies, indices = torch.sort(energies.to(device))
+        indices_cpu = indices.cpu()  # For indexing CPU tensors
+        hand_states = hand_states[indices][:n_envs]
+        if contact_idx is not None:
+            contact_idx = contact_idx[indices_cpu][:n_envs].to(device)  # Move to device
+    else:
+        hand_states = hand_states[:n_envs]
+        if contact_idx is not None:
+            contact_idx = contact_idx[:n_envs].to(device)  # Move to device
+
+    all_data = []
+    n_axis = max(1, int(np.sqrt(n_envs)))
+
+    # Temporal spacing for frames within a trajectory
+    temporal_spacing = args.spacing * 0.6  # Closer spacing for temporal frames
+
+    # Distinct hue colors for each trajectory (warm to cool spectrum)
+    trajectory_hues = [
+        (220, 80, 80),  # Red
+        (80, 80, 220),  # Blue
+        (80, 180, 80),  # Green
+        (200, 150, 50),  # Orange
+        (150, 80, 180),  # Purple
+        (80, 180, 180),  # Cyan
+        (180, 80, 150),  # Pink
+        (150, 150, 80),  # Yellow-green
+    ]
+
+    for env_id in range(n_envs):
+        data = []
+        loc_x = env_id % n_axis
+        loc_y = env_id // n_axis
+
+        # Get trajectory-specific color
+        traj_color = trajectory_hues[env_id % len(trajectory_hues)]
+        traj_line_color = f"rgb({traj_color[0]}, {traj_color[1]}, {traj_color[2]})"
+
+        # Base offset for this trajectory
+        base_offset = np.array([loc_x * args.spacing * T + origin[0], loc_y * args.spacing + origin[1], 0])
+
+        # Store wrist positions for trajectory line
+        wrist_positions = []
+
+        for t in range(T):
+            # Temporal offset along X axis
+            frame_offset = base_offset + np.array([t * temporal_spacing, 0, 0])
+
+            # Get hand state for this frame
+            frame_state = hand_states[env_id, t]  # (D,)
+
+            # Convert to hand_pose format: extract translation, rot6d, joints
+            translation = frame_state[:3]
+            rot6d = frame_state[3:9]
+            joints = frame_state[9:]
+
+            # Convert rot6d to rotation matrix to quaternion
+            from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
+
+            R = robust_compute_rotation_matrix_from_ortho6d(rot6d.unsqueeze(0))[0]
+            quat_xyzw = roma.rotmat_to_unitquat(R.unsqueeze(0))[0]
+            quat_wxyz = quat_xyzw[[3, 0, 1, 2]]
+
+            # Build hand_pose: (trans, rot6d, joints)
+            hand_pose = torch.cat([translation, rot6d, joints]).unsqueeze(0)
+
+            # Get contact indices for this trajectory
+            frame_contacts = contact_idx[env_id] if contact_idx is not None else "all"
+
+            # Set hand parameters
+            hand_model.set_parameters(
+                hand_pose,
+                contact_point_indices=frame_contacts.unsqueeze(0)
+                if isinstance(frame_contacts, torch.Tensor)
+                else frame_contacts,
+            )
+
+            # Frame color: trajectory hue with temporal brightness gradient (lighter→darker)
+            brightness = 1.0 - 0.5 * (t / max(1, T - 1))  # 1.0 (bright) → 0.5 (darker)
+            frame_r = int(min(255, traj_color[0] * brightness + 128 * (1 - brightness)))
+            frame_g = int(min(255, traj_color[1] * brightness + 128 * (1 - brightness)))
+            frame_b = int(min(255, traj_color[2] * brightness + 128 * (1 - brightness)))
+            frame_color = f"rgba({frame_r}, {frame_g}, {frame_b}, 1.0)"
+
+            hand_plotly = hand_model.get_plotly_data(
+                i=0,
+                opacity=0.7 + 0.3 * (t / max(1, T - 1)),  # Later frames more opaque
+                color=frame_color,
+                with_contact_points=True,
+                with_penetration_points=False,
+                with_surface_points=False,
+                simplify=False,
+                offset=frame_offset.tolist(),
+            )
+            data += hand_plotly
+
+            # Add object at this frame
+            obj_plotly = object_model.get_plotly_data(
+                i=0,
+                simplify=False,
+                offset=frame_offset.tolist(),
+                color="rgba(128, 255, 128, 0.8)",
+                opacity=0.6 + 0.4 * (t / max(1, T - 1)),
+            )
+            data += obj_plotly
+
+            # Store wrist position for trajectory line
+            wrist_pos = translation.detach().cpu().numpy() + frame_offset
+            wrist_positions.append(wrist_pos)
+
+            # Add frame label
+            label_offset = frame_offset + np.array([0, 0, 0.15])
+            data.append(
+                go.Scatter3d(
+                    x=[label_offset[0]],
+                    y=[label_offset[1]],
+                    z=[label_offset[2]],
+                    mode="text",
+                    text=[f"t={t}"],
+                    textposition="top center",
+                    textfont=dict(size=12, color="black"),
+                )
+            )
+
+        # Draw trajectory line connecting wrist positions (same color as trajectory)
+        if len(wrist_positions) > 1:
+            wrist_positions = np.array(wrist_positions)
+            data.append(
+                go.Scatter3d(
+                    x=wrist_positions[:, 0],
+                    y=wrist_positions[:, 1],
+                    z=wrist_positions[:, 2],
+                    mode="lines+markers",
+                    line=dict(color=traj_line_color, width=6),
+                    marker=dict(size=6, color=traj_line_color),
+                    name=f"Trajectory {env_id}",
+                )
+            )
+
+        # Add trajectory ID and energy label
+        if energies is not None and len(energies) > env_id:
+            energy_label_offset = base_offset + np.array([T * temporal_spacing / 2, 0, -0.12])
+            data.append(
+                go.Scatter3d(
+                    x=[energy_label_offset[0]],
+                    y=[energy_label_offset[1]],
+                    z=[energy_label_offset[2]],
+                    mode="text",
+                    text=[f"Traj {env_id}: E={energies[env_id]:.2f}"],
+                    textposition="bottom center",
+                    textfont=dict(size=14, color=traj_line_color, family="Arial Black"),
+                )
+            )
+
+        all_data.append(data)
+
+    return all_data
+
+
+def _show_dir(dir, args, device, origin=(0, 0)):
+    # First, try to find trajectory files directly in the given directory
+    direct_pattern = os.path.join(dir, "*.dexgrasp.pt")
+    direct_files = glob.glob(direct_pattern)
+
+    if direct_files:
+        # Found trajectory file directly in the directory
+        checkpoint_path = sorted(direct_files, key=os.path.getmtime)[-1]
+        print(f"Loading from {checkpoint_path}")
+    else:
+        # Fall back to the structured directory pattern
+        data_path = os.path.join(dir, args.hand_name)
+        glob_pattern = os.path.join(data_path, args.num_contacts, args.energy, args.grasp_type, "*.dexgrasp.pt")
+
+        print(f"Loading from {glob_pattern}")
+        if len(glob.glob(glob_pattern, recursive=True)) == 0:
+            print(f"No files found for pattern {glob_pattern}")
+            return None
+        checkpoint_path = sorted(glob.glob(glob_pattern, recursive=True), key=os.path.getmtime)[-1]
     if "diffused" in checkpoint_path:
         checkpoint_path = sorted(glob.glob(glob_pattern, recursive=True), key=os.path.getmtime)[0]
 
@@ -527,14 +730,95 @@ def _show_dir(dir, args, device, origin=(0, 0)):
     n_grasps_in_file = len(checkpoint_data.get("values", []))
     print(f"Loading data from {checkpoint_path}")
     print(f"  Found {n_grasps_in_file} grasps in file")
-    # put on cpu, detach grad
 
+    # Check if this is trajectory data
+    has_trajectory = "trajectory" in checkpoint_data and checkpoint_data["trajectory"] is not None
+    if has_trajectory:
+        traj = checkpoint_data["trajectory"]
+        n_frames = traj.get("n_frames", 1)
+        print(f"  \033[93mTrajectory data detected: T={n_frames} frames\033[0m")
+
+    # Get hand name from metadata if available (for trajectory files)
+    metadata = checkpoint_data.get("metadata", {})
+    hand_name = metadata.get("hand_name", args.hand_name)
+    if hand_name != args.hand_name:
+        print(f"  \033[93mUsing hand_name from checkpoint: {hand_name}\033[0m")
+
+    # Initialize hand model
     hand_model = get_hand_model(
-        args.hand_name,
+        hand_name,
         args.device,
         use_collision_if_possible=True,
         grasp_type=checkpoint_data.get("grasp_type", None),
     )
+
+    # Dispatch to trajectory visualization if trajectory data is present
+    if has_trajectory and n_frames > 1:
+        # Initialize object model for trajectory visualization
+        # Try to get object code from metadata first
+        metadata = checkpoint_data.get("metadata", {})
+        object_code = metadata.get("object_code", None)
+
+        if args.obj_path is not None:
+            root_path = args.obj_path
+            if object_code is None:
+                object_code = os.path.basename(args.obj_path)
+        else:
+            # Fallback: try to infer from directory structure
+            # Expected: objects/<object_code>/grasp_predictions/...
+            dir_parts = os.path.normpath(dir).split(os.sep)
+            if "objects" in dir_parts:
+                objects_idx = dir_parts.index("objects")
+                if objects_idx + 1 < len(dir_parts):
+                    root_path = os.path.join(*dir_parts[: objects_idx + 1])
+                    if object_code is None:
+                        object_code = dir_parts[objects_idx + 1]
+                else:
+                    root_path = "./objects"
+            else:
+                root_path = os.path.dirname(os.path.dirname(dir))
+                if object_code is None:
+                    object_code = os.path.basename(os.path.dirname(dir))
+
+        print(f"  Object: {object_code}, root_path: {root_path}")
+
+        batch_size = min(args.max_grasps, n_grasps_in_file)
+        object_model = ObjectModel(
+            data_root_path=root_path,
+            batch_size_each=batch_size,
+            num_samples=1500,
+            device=device,
+            scale=args.scale,
+        )
+        object_model.initialize([object_code])
+
+        # Visualize trajectory
+        all_data = _show_trajectory(checkpoint_data, args, device, hand_model, object_model, origin)
+
+        # Create and save the plot
+        # For trajectory mode, use a simpler output directory structure
+        output_dir = os.path.join(
+            args.vis_dir,
+            object_code,
+            hand_name,
+            f"T{n_frames}",
+        )
+        os.makedirs(output_dir, exist_ok=True)
+
+        fig = go.Figure(_flatten(all_data))
+        if args.show:
+            fig.update_layout(scene=dict(aspectmode="data"))
+            fig.show()
+
+        try:
+            convert_plotly_to_gltf(fig, out_path=os.path.join(output_dir, "trajectory_render.glb"))
+            print("\033[94m=> Saved trajectory mesh to", os.path.join(output_dir, "trajectory_render.glb"), "\033[0m")
+        except Exception as e:
+            print("Failed to convert trajectory to gltf:", e)
+
+        return all_data
+
+    # Legacy single-frame visualization below
     params = checkpoint_data["parameters"]
     params = {k: v.detach().cpu() for k, v in params.items()}
     joint_states = []
@@ -1178,6 +1462,8 @@ if __name__ == "__main__":
     arg_parser.add_argument("--obj_path", type=str, default=None, help="object path")
     arg_parser.add_argument("--scale", type=float, default=1.0, help="scale of the object")
     arg_parser.add_argument("--show", action="store_true", help="show the plot")
+    arg_parser.add_argument("--trajectory_mode", action="store_true", help="force trajectory visualization mode")
+    arg_parser.add_argument("--frame_idx", type=int, default=-1, help="visualize specific frame only (-1 for all)")
 
     args = arg_parser.parse_args()
     if args.dataset is not None:

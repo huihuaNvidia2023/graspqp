@@ -1,0 +1,98 @@
+# Multi-frame trajectory prior for T>2 optimization
+# Frame 0: Far approach pose
+# Frame 1: Near approach pose
+# Frame 2: Pre-grasp pose
+# Frame 3: Final contact pose
+
+contact: {mode: uniform}
+
+priors:
+  # Frame 0: Far approach (furthest from object, fingers open)
+  - translation: [-0.0993, -0.0381, 0.0292]
+    quaternion: [-0.1399, 0.8238, 0.4562, 0.2987]
+    joints:
+      index_joint_0: -0.1173
+      index_joint_1: 0.3473
+      index_joint_2: 0.5967
+      index_joint_3: 0.5775
+      middle_joint_0: 0.1546
+      middle_joint_1: 0.3925
+      middle_joint_2: 0.6615
+      middle_joint_3: 0.3822
+      ring_joint_0: -0.1864
+      ring_joint_1: 0.0527
+      ring_joint_2: 0.3539
+      ring_joint_3: 0.2707
+      thumb_joint_0: 1.1015
+      thumb_joint_1: 0.1191
+      thumb_joint_2: 0.5830
+      thumb_joint_3: -0.0116
+
+  # Frame 1: Near approach (getting closer)
+  - translation: [-0.0843, -0.0306, 0.0217]
+    quaternion: [-0.1499, 0.8138, 0.4662, 0.3087]
+    joints:
+      index_joint_0: -0.1173
+      index_joint_1: 0.3973
+      index_joint_2: 0.6567
+      index_joint_3: 0.6375
+      middle_joint_0: 0.1546
+      middle_joint_1: 0.4525
+      middle_joint_2: 0.7215
+      middle_joint_3: 0.4422
+      ring_joint_0: -0.1864
+      ring_joint_1: 0.0777
+      ring_joint_2: 0.3939
+      ring_joint_3: 0.3107
+      thumb_joint_0: 1.1515
+      thumb_joint_1: 0.1541
+      thumb_joint_2: 0.6330
+      thumb_joint_3: 0.0134
+
+  # Frame 2: Pre-grasp (close, fingers starting to curl)
+  - translation: [-0.0743, -0.0256, 0.0167]
+    quaternion: [-0.1549, 0.8088, 0.4712, 0.3137]
+    joints:
+      index_joint_0: -0.1173
+      index_joint_1: 0.4223
+      index_joint_2: 0.6867
+      index_joint_3: 0.6675
+      middle_joint_0: 0.1546
+      middle_joint_1: 0.4825
+      middle_joint_2: 0.7515
+      middle_joint_3: 0.4722
+      ring_joint_0: -0.1864
+      ring_joint_1: 0.1002
+      ring_joint_2: 0.4239
+      ring_joint_3: 0.3407
+      thumb_joint_0: 1.1765
+      thumb_joint_1: 0.1716
+      thumb_joint_2: 0.6580
+      thumb_joint_3: 0.0259
+
+  # Frame 3: Final grasp (in contact)
+  - translation: [-0.0693, -0.0231, 0.0142]
+    quaternion: [-0.1599, 0.8038, 0.4762, 0.3187]
+    joints:
+      index_joint_0: -0.1173
+      index_joint_1: 0.4473
+      index_joint_2: 0.7167
+      index_joint_3: 0.6975
+      middle_joint_0: 0.1546
+      middle_joint_1: 0.5125
+      middle_joint_2: 0.7815
+      middle_joint_3: 0.5022
+      ring_joint_0: -0.1864
+      ring_joint_1: 0.1227
+      ring_joint_2: 0.4539
+      ring_joint_3: 0.3707
+      thumb_joint_0: 1.2015
+      thumb_joint_1: 0.1891
+      thumb_joint_2: 0.683
+      thumb_joint_3: 0.0384
+
+jitter_translation: 0.01
+jitter_rotation: 0.05
+jitter_joints: 0.05
+prior_weight: 10.0
+dt: 0.1  # 100ms between frames
