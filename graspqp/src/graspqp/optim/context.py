@@ -302,6 +302,29 @@ class OptimizationContext:
                     self.hand_model.global_translation = flat_hand[:, :3]
                     self.hand_model.global_rotation = robust_compute_rotation_matrix_from_ortho6d(flat_hand[:, 3:9])
                     self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
+
+                    # Also update hand_pose reference for costs that read it directly
+                    self.hand_model.hand_pose = flat_hand
+
+                    # CRITICAL: Recompute contact points from FK result!
+                    # Without this, contact_points would be stale and contact_distance
+                    # would not have gradients flowing through it.
+                    self.hand_model.all_contact_points, self.hand_model._all_contact_normals = (
+                        self.hand_model.get_contact_candidates(with_normals=True)
+                    )
+                    self.hand_model.contact_candidates = self.hand_model.all_contact_points
+
+                    # Recompute selected contact points based on current indices
+                    contact_indices = self._current_contact_indices
+                    if contact_indices is None:
+                        contact_indices = self.hand_model.contact_point_indices
+                    if contact_indices is not None:
+                        self.hand_model.contact_points = self.hand_model.all_contact_points.gather(
+                            1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                        )
+                        self.hand_model.contact_normals = self.hand_model._all_contact_normals.gather(
+                            1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                        )
                 else:
                     # Normal mode: full set_parameters
                     if self._current_contact_indices is not None:

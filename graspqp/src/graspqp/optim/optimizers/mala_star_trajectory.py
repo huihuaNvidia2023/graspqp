@@ -15,6 +15,7 @@ This optimizer treats the trajectory as a single optimization unit.
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any, Dict, Optional
+import warnings
 
 import torch
 from torch import Tensor
@@ -172,9 +173,12 @@ class MalaStarTrajectoryOptimizer(Optimizer):
             _, grad = self._compute_energy_and_grad(state, problem)  # grad: (B, T, D)
 
             if grad is None:
+                warnings.warn(
+                    "Gradient is None after backward pass. This indicates broken gradient flow - "
+                    "check that costs are differentiable and don't detach tensors.",
+                    RuntimeWarning
+                )
                 grad = torch.zeros_like(state.hand_states)
-
-            old_grad = grad.clone()
 
             # Clip gradients if configured
             if self.clip_grad:
@@ -188,6 +192,12 @@ class MalaStarTrajectoryOptimizer(Optimizer):
 
             # Handle NaN in EMA
             if self._ema_grad.isnan().any():
+                nan_count = self._ema_grad.isnan().sum().item()
+                warnings.warn(
+                    f"NaN detected in EMA gradient ({nan_count} values). "
+                    "This may indicate numerical instability in cost computation.",
+                    RuntimeWarning
+                )
                 self._ema_grad[torch.isnan(self._ema_grad)] = 0
 
             # Normalized gradient step
@@ -201,6 +211,12 @@ class MalaStarTrajectoryOptimizer(Optimizer):
             with torch.no_grad():
                 if proposed_hand.isnan().any():
                     nan_mask = proposed_hand.isnan().any(dim=-1).any(dim=-1)  # (B,)
+                    nan_batch_count = nan_mask.sum().item()
+                    warnings.warn(
+                        f"NaN detected in proposed hand states ({nan_batch_count}/{nan_mask.shape[0]} batches). "
+                        "Reverting affected batches to previous state.",
+                        RuntimeWarning
+                    )
                     proposed_hand[nan_mask] = state.hand_states[nan_mask]
 
             # =====================================================================
@@ -325,7 +341,6 @@ class MalaStarTrajectoryOptimizer(Optimizer):
             Tuple of (energy (B,), gradient (B, T, D) or None)
         """
         B, T, D = state.hand_states.shape
-        device = state.device
         hand_model = problem.context.hand_model
 
         # Clear step cache
@@ -429,7 +444,6 @@ class MalaStarTrajectoryOptimizer(Optimizer):
         new_contacts = current_contacts_expanded.clone()
 
         # Reshape to (B, T, n_contacts) for trajectory-level logic
-        current_per_traj = current_contacts_expanded.reshape(B, T, n_contact)
         new_per_traj = new_contacts.reshape(B, T, n_contact)
 
         # Determine which TRAJECTORIES to switch (decision made per trajectory, not per frame)
