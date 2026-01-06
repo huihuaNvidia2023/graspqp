@@ -59,6 +59,14 @@ def parse_args():
     parser.add_argument("--lr", default=0.01, type=float, help="Learning rate")
     parser.add_argument("--beta1", default=0.9, type=float)
     parser.add_argument("--beta2", default=0.999, type=float)
+    
+    # Adaptive contact resampling
+    parser.add_argument("--resample_contacts", action="store_true", 
+                        help="Enable contact resampling for stuck batches")
+    parser.add_argument("--resample_interval", default=50, type=int,
+                        help="Check for stuck batches every N steps")
+    parser.add_argument("--resample_threshold", default=3.0, type=float,
+                        help="Resample if energy > best * threshold")
 
     # Initialization
     parser.add_argument("--jitter_strength", default=0.1, type=float)
@@ -202,6 +210,20 @@ def main():
         device=device,
         profiler=profiler,
     )
+    
+    # Set up contact sampler with finger constraints
+    # Try from reference first, then infer from current contacts
+    sampler = context.create_contact_sampler_from_reference()
+    if sampler is None:
+        # Infer finger constraints from current contact indices
+        sampler = context.create_contact_sampler_from_current_contacts()
+    
+    if context.contact_sampler is not None:
+        print(f"  Contact sampler: configured")
+        if context._contact_fingers:
+            print(f"    Allowed fingers: {context._contact_fingers}")
+    else:
+        print(f"  Contact sampler: uniform (no finger constraints)")
 
     # =========================================================================
     # 5. Create OptimizationProblem with costs
@@ -249,8 +271,13 @@ def main():
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         debug=args.debug,
+        resample_contacts=args.resample_contacts,
+        resample_interval=args.resample_interval,
+        resample_threshold=args.resample_threshold,
     )
     print(f"\nOptimizer: AdamOptimizer (lr={args.lr})")
+    if args.resample_contacts:
+        print(f"  Contact resampling: enabled (interval={args.resample_interval}, threshold={args.resample_threshold}x)")
 
     # IMPORTANT: Initialize optimizer with state (creates persistent params)
     print("\nInitializing optimizer...")

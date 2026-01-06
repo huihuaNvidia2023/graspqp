@@ -137,6 +137,73 @@ class OptimizationContext:
         except ImportError:
             # Fallback if graspqp.core not available
             return None
+    
+    def create_contact_sampler_from_current_contacts(self):
+        """
+        Create a contact sampler based on CURRENT contact indices.
+        
+        This infers which fingers are in contact from the current contact
+        point indices and creates a sampler that only samples from those fingers.
+        
+        Use this when the reference doesn't have explicit finger constraints
+        but you want to preserve the finger pattern while allowing different
+        contact points within those fingers.
+        
+        Returns:
+            The contact sampler, or None if creation failed.
+        """
+        contact_indices = self.hand_model.contact_point_indices
+        if contact_indices is None:
+            return None
+            
+        try:
+            from graspqp.core import ContactSamplingConfig, HierarchicalContactSampler
+            
+            # Get the link (finger) for each contact point
+            # hand_model should have a mapping from contact index to link
+            if not hasattr(self.hand_model, 'global_index_to_link_index'):
+                return None
+                
+            # Get unique links from current contacts
+            link_index_map = self.hand_model.global_index_to_link_index  # tensor
+            
+            # Get link names from mesh keys (in order)
+            link_names = list(self.hand_model.mesh.keys())
+            
+            # For each contact, find which link it belongs to
+            # contact_indices: (B, n_contacts)
+            # We need the first batch (they should all have same finger pattern)
+            first_batch_contacts = contact_indices[0]  # (n_contacts,)
+            
+            # Map contact indices to link names
+            contact_links = set()
+            for contact_idx in first_batch_contacts:
+                link_idx = link_index_map[contact_idx.item()].item()
+                if link_idx < len(link_names):
+                    link_name = link_names[link_idx]
+                    contact_links.add(link_name)
+            
+            contact_fingers = list(contact_links)
+            
+            if len(contact_fingers) == 0:
+                return None
+                
+            # Create sampler with these finger constraints
+            config = ContactSamplingConfig(
+                mode="guided",
+                preferred_links=contact_fingers,
+                preference_weight=1.0,  # Only sample from these fingers
+                min_fingers=len(contact_fingers),
+            )
+            self._contact_sampler = HierarchicalContactSampler(self.hand_model, config)
+            self._contact_fingers = contact_fingers
+            return self._contact_sampler
+            
+        except (ImportError, AttributeError, KeyError, IndexError) as e:
+            # Fallback if something goes wrong
+            import warnings
+            warnings.warn(f"Could not create contact sampler from current contacts: {e}")
+            return None
 
     def get_cached(self, key: str) -> Optional[Any]:
         """
