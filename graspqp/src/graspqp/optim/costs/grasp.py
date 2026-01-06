@@ -96,6 +96,15 @@ class ForceClosureCost(PerFrameCost):
 
     Equivalent to E_fc in fit.py.
     Uses the existing GraspSpanMetric for QP-based force closure.
+
+    OPTIMIZATION: Only computes QP when contacts are established (mean contact
+    distance below threshold). This avoids wasteful QP computations and
+    numerical instability warnings when fingers aren't touching the object.
+
+    Config options:
+        svd_gain: SVD regularization gain (default: 0.1)
+        contact_threshold: Mean contact distance threshold for QP computation (default: 0.01)
+                          Set to None or inf to always compute QP.
     """
 
     def __init__(
@@ -110,6 +119,7 @@ class ForceClosureCost(PerFrameCost):
 
         config = config or {}
         self.svd_gain = config.get("svd_gain", 0.1)
+        self.contact_threshold = config.get("contact_threshold", 0.01)
         self._energy_fnc = None  # Set externally
 
     def set_energy_function(self, energy_fnc):
@@ -124,10 +134,14 @@ class ForceClosureCost(PerFrameCost):
         """
         Compute per-frame force closure cost.
 
+        Only computes QP for samples where mean contact distance is below
+        contact_threshold. Returns zero cost for samples without established contacts.
+
         Returns:
             Per-frame costs. Shape: (B, T)
         """
         B, T, D = state.hand_states.shape
+        N = B * T  # Flattened batch size
         device = state.device
 
         if self._energy_fnc is None:
@@ -142,16 +156,63 @@ class ForceClosureCost(PerFrameCost):
         # Get SDF distance and normals (CACHED - expensive operation!)
         distance, contact_normal = ctx.get_contact_sdf_cached(flat_hand)
 
+        # Check which samples have established contacts
+        # Mean absolute distance across all contact points per sample
+        mean_distance = distance.abs().mean(dim=-1)  # (N,)
+
+        # Determine which samples should compute QP
+        if self.contact_threshold is not None and self.contact_threshold < float('inf'):
+            in_contact_mask = mean_distance < self.contact_threshold  # (N,)
+            n_in_contact = in_contact_mask.sum().item()
+
+            # If no samples are in contact, return zeros (skip expensive QP)
+            if n_in_contact == 0:
+                return torch.zeros(B, T, device=device)
+
+            # If all samples are in contact, compute normally
+            if n_in_contact == N:
+                in_contact_mask = None  # Flag to compute all
+        else:
+            in_contact_mask = None  # Compute all (no threshold)
+
         # Compute force closure energy (QP solver - expensive!)
         with ctx._profile_section("qp_solver"):
-            E_fc, _ = self._energy_fnc(
-                contact_pts=contact_points,
-                contact_normals=contact_normal,
-                sdf=distance,
-                cog=ctx.object_model.cog,
-                with_solution=True,
-                svd_gain=self.svd_gain,
-            )
+            if in_contact_mask is None:
+                # Compute for all samples
+                E_fc, _ = self._energy_fnc(
+                    contact_pts=contact_points,
+                    contact_normals=contact_normal,
+                    sdf=distance,
+                    cog=ctx.object_model.cog,
+                    with_solution=True,
+                    svd_gain=self.svd_gain,
+                )
+            else:
+                # Compute only for samples with established contacts
+                E_fc = torch.zeros(N, device=device)
+
+                # Extract in-contact samples
+                contact_pts_subset = contact_points[in_contact_mask]
+                contact_normals_subset = contact_normal[in_contact_mask]
+                distance_subset = distance[in_contact_mask]
+
+                # COG needs to match batch size
+                cog = ctx.object_model.cog
+                if cog.shape[0] == N:
+                    cog_subset = cog[in_contact_mask]
+                else:
+                    # COG is shared across batches
+                    cog_subset = cog
+
+                E_fc_subset, _ = self._energy_fnc(
+                    contact_pts=contact_pts_subset,
+                    contact_normals=contact_normals_subset,
+                    sdf=distance_subset,
+                    cog=cog_subset,
+                    with_solution=True,
+                    svd_gain=self.svd_gain,
+                )
+                E_fc[in_contact_mask] = E_fc_subset
 
         # Reshape to (B, T)
         return E_fc.reshape(B, T)

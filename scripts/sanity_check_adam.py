@@ -34,6 +34,7 @@ from graspqp.optim.costs.penetration import PenetrationCost, SelfPenetrationCost
 from graspqp.optim.optimizers.torch_optim import AdamOptimizer
 from graspqp.optim.problem import OptimizationProblem
 from graspqp.optim.state import ReferenceTrajectory, TrajectoryState
+from graspqp.utils.profiler import get_profiler
 from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
 
@@ -86,6 +87,9 @@ def parse_args():
         choices=["convex_hull", "prior"],
     )
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug output")
+    parser.add_argument("--profile", action="store_true", help="Enable detailed profiling")
+    parser.add_argument("--fc_threshold", default=0.01, type=float, 
+                        help="Contact distance threshold for force closure (None=always compute)")
 
     return parser.parse_args()
 
@@ -100,6 +104,9 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
+    # Initialize profiler
+    profiler = get_profiler(enabled=args.profile, cuda_sync=True)
+
     num_objects = len(args.object_code_list)
     total_batch_size = num_objects * args.batch_size
 
@@ -111,6 +118,9 @@ def main():
     print(f"Batch size: {total_batch_size}")
     print(f"Iterations: {args.n_iter}")
     print(f"Learning rate: {args.lr}")
+    if args.profile:
+        print("Profiling: ENABLED")
+    print(f"FC threshold: {args.fc_threshold}")
     print("=" * 70)
 
     # =========================================================================
@@ -190,17 +200,24 @@ def main():
         object_model=object_model,
         reference=reference,
         device=device,
+        profiler=profiler,
     )
 
     # =========================================================================
     # 5. Create OptimizationProblem with costs
     # =========================================================================
-    problem = OptimizationProblem(context)
+    problem = OptimizationProblem(context, profiler=profiler)
 
     problem.add_cost(ContactDistanceCost(name="contact_distance", weight=args.w_dis))
 
     if args.w_fc > 0:
-        fc_cost = ForceClosureCost(name="force_closure", weight=args.w_fc, config={"svd_gain": args.w_svd})
+        # fc_threshold=None means always compute QP (for comparison)
+        # fc_threshold=0.01 means only compute when contacts established
+        fc_config = {
+            "svd_gain": args.w_svd,
+            "contact_threshold": args.fc_threshold if args.fc_threshold > 0 else None,
+        }
+        fc_cost = ForceClosureCost(name="force_closure", weight=args.w_fc, config=fc_config)
         energy_fnc = GraspSpanMetricFactory.create(
             GraspSpanMetricFactory.MetricType.GRASPQP,
             solver_kwargs={
@@ -259,40 +276,49 @@ def main():
 
     energy_history = []
 
+    import time
+    start_time = time.perf_counter()
+
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
-        # Clear step cache
-        context.clear_step_cache()
+        with profiler.section("step"):
+            # Clear step cache
+            context.clear_step_cache()
 
-        # Store old state for comparison
-        old_hand = state.hand_states.detach().clone()
+            # Store old state for comparison
+            old_hand = state.hand_states.detach().clone()
 
-        # Optimizer step
-        state = optimizer.step(state, problem)
+            # Optimizer step
+            with profiler.section("optimizer_step"):
+                state = optimizer.step(state, problem)
 
-        # Compute energy for logging
-        with torch.no_grad():
-            energy = problem.total_energy(state)
-            energy_history.append(energy.mean().item())
-
-        # Check hand state change
-        hand_change = (state.hand_states - old_hand).abs().mean().item()
-
-        # Periodic detailed logging
-        if step % 50 == 0 or step <= 5:
-            print(f"\nStep {step}:")
-            print(f"  Energy: mean={energy.mean().item():.4f}, best={energy.min().item():.4f}")
-            print(f"  Hand state change: {hand_change:.6f}")
-
-            # Note: After optimizer.step(), the internal params are new tensors 
-            # (created via detach().clone()), so grad is None. This is expected.
-            # The gradient existed during backward() but is cleared when new tensors are created.
-            # Energy decrease confirms gradient flow is working.
-
-            # Per-cost breakdown
+            # Compute energy for logging
             with torch.no_grad():
-                costs = problem.evaluate_all(state)
-                for k, v in costs.items():
-                    print(f"    {k}: {v.mean().item():.4f}")
+                energy = problem.total_energy(state)
+                energy_history.append(energy.mean().item())
+
+            # Check hand state change
+            hand_change = (state.hand_states - old_hand).abs().mean().item()
+
+            # Periodic detailed logging
+            if step % 50 == 0 or step <= 5:
+                print(f"\nStep {step}:")
+                print(f"  Energy: mean={energy.mean().item():.4f}, best={energy.min().item():.4f}")
+                print(f"  Hand state change: {hand_change:.6f}")
+
+                # Note: After optimizer.step(), the internal params are new tensors 
+                # (created via detach().clone()), so grad is None. This is expected.
+                # The gradient existed during backward() but is cleared when new tensors are created.
+                # Energy decrease confirms gradient flow is working.
+
+                # Per-cost breakdown
+                with torch.no_grad():
+                    costs = problem.evaluate_all(state)
+                    for k, v in costs.items():
+                        print(f"    {k}: {v.mean().item():.4f}")
+
+        profiler.step_done()
+
+    total_time = time.perf_counter() - start_time
 
     # =========================================================================
     # 9. Final results
@@ -356,6 +382,12 @@ def main():
     print(f"Initial energy: {energy_history[0]:.4f}")
     print(f"Final energy: {energy_history[-1]:.4f}")
     print(f"Energy reduction: {energy_history[0] - energy_history[-1]:.4f} ({(1 - energy_history[-1]/energy_history[0])*100:.1f}%)")
+    print(f"\nTiming: {total_time:.2f}s total, {total_time * 1000 / args.n_iter:.2f}ms/iter")
+
+    # Profiler summary
+    if args.profile:
+        print("\n=== Profiler Summary ===")
+        profiler.summary()
 
     # Check if stuck
     if len(energy_history) > 50:
