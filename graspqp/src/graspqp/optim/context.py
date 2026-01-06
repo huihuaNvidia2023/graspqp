@@ -75,6 +75,11 @@ class OptimizationContext:
         # Flag to skip set_parameters (for gradient computation mode)
         # When True, costs should assume hand_model is already configured
         self._skip_set_parameters: bool = False
+        
+        # Flag to control contact point recomputation in gradient mode
+        # - True: Recompute contact points from FK (needed for Adam where set_parameters wasn't called)
+        # - False: Contact points already set by optimizer (e.g., MALA* via set_parameters)
+        self._recompute_contacts: bool = True
 
     def _profile_section(self, name: str):
         """Context manager for profiling a section."""
@@ -373,25 +378,29 @@ class OptimizationContext:
                     # Also update hand_pose reference for costs that read it directly
                     self.hand_model.hand_pose = flat_hand
 
-                    # CRITICAL: Recompute contact points from FK result!
-                    # Without this, contact_points would be stale and contact_distance
-                    # would not have gradients flowing through it.
-                    self.hand_model.all_contact_points, self.hand_model._all_contact_normals = (
-                        self.hand_model.get_contact_candidates(with_normals=True)
-                    )
-                    self.hand_model.contact_candidates = self.hand_model.all_contact_points
+                    # Recompute contact points only if _recompute_contacts is True.
+                    # - Adam sets this True because it didn't call set_parameters
+                    # - MALA* sets this False because set_parameters already set contact points
+                    if self._recompute_contacts:
+                        # CRITICAL: Recompute contact points from FK result!
+                        # Without this, contact_points would be stale and contact_distance
+                        # would not have gradients flowing through it.
+                        self.hand_model.all_contact_points, self.hand_model._all_contact_normals = (
+                            self.hand_model.get_contact_candidates(with_normals=True)
+                        )
+                        self.hand_model.contact_candidates = self.hand_model.all_contact_points
 
-                    # Recompute selected contact points based on current indices
-                    contact_indices = self._current_contact_indices
-                    if contact_indices is None:
-                        contact_indices = self.hand_model.contact_point_indices
-                    if contact_indices is not None:
-                        self.hand_model.contact_points = self.hand_model.all_contact_points.gather(
-                            1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
-                        )
-                        self.hand_model.contact_normals = self.hand_model._all_contact_normals.gather(
-                            1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
-                        )
+                        # Recompute selected contact points based on current indices
+                        contact_indices = self._current_contact_indices
+                        if contact_indices is None:
+                            contact_indices = self.hand_model.contact_point_indices
+                        if contact_indices is not None:
+                            self.hand_model.contact_points = self.hand_model.all_contact_points.gather(
+                                1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                            )
+                            self.hand_model.contact_normals = self.hand_model._all_contact_normals.gather(
+                                1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
+                            )
                 else:
                     # Normal mode: full set_parameters
                     if self._current_contact_indices is not None:

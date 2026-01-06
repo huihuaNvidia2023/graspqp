@@ -364,6 +364,8 @@ class MalaStarTrajectoryOptimizer(Optimizer):
 
         # Skip set_parameters in costs - we'll do it here
         problem.context._skip_set_parameters = True
+        # We compute contact points below, so don't recompute in ensure_hand_configured
+        problem.context._recompute_contacts = False
 
         try:
             # Configure FK
@@ -390,6 +392,9 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                     1, contact_indices.unsqueeze(-1).expand(-1, -1, 3)
                 )
 
+            # Mark hand as configured so ensure_hand_configured in costs skips FK
+            problem.context.set_cached("_hand_configured_ptr", flat_hand.data_ptr(), scope="step")
+
             # Create temporary state for cost evaluation
             temp_state = state.clone()
             temp_state.hand_states = hand_states
@@ -407,6 +412,7 @@ class MalaStarTrajectoryOptimizer(Optimizer):
 
         finally:
             problem.context._skip_set_parameters = False
+            problem.context._recompute_contacts = True
 
     def _sample_contacts_for_trajectory(
         self,
