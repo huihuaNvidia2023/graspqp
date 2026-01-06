@@ -133,6 +133,15 @@ class AdamOptimizer(Optimizer):
         # CRITICAL: Enable gradient mode in context
         # This prevents set_parameters from cloning tensors, preserving gradient flow
         problem.context._skip_set_parameters = True
+        
+        # For trajectory mode (T > 1), we need to configure hand_model with flattened params
+        # so that FK and contact points are computed correctly
+        hand_model = problem.context.hand_model
+        B, T, D = self._hand_param.shape
+        flat_hand = self._hand_param.reshape(B * T, D)
+        
+        # Set hand_model.hand_pose to our parameter tensor (for gradient flow)
+        hand_model.hand_pose = flat_hand
 
         try:
             # Compute total energy

@@ -232,17 +232,42 @@ def export_trajectory(
     Export trajectory in extended format compatible with visualize_result.py.
 
     Format follows docs/OPTIMIZATION_FRAMEWORK_DESIGN.md.
+    
+    Handles both trajectory mode (B, T, D) and sanity check mode (B*T, 1, D).
+    In sanity check mode, unflattens back to (B, T, D) using args.n_frames.
     """
-    B, T, D_hand = state.hand_states.shape
+    B_state, T_state, D_hand = state.hand_states.shape
+    
+    # Detect sanity check mode: state has T=1 but args.n_frames > 1
+    # In this case, B_state is actually B*T flattened
+    sanity_check_mode = T_state == 1 and args.n_frames > 1
+    
+    if sanity_check_mode:
+        # Unflatten: (B*T, 1, D) -> (B, T, D)
+        T = args.n_frames
+        B = B_state // T
+        hand_states = state.hand_states.reshape(B, T, D_hand)
+        object_states = state.object_states.reshape(B, T, -1)
+        # Energies are per-trajectory in sanity check mode, need to reshape
+        # Actually in sanity check mode, energies are (B*T,), we need to aggregate
+        # Take mean energy across frames for each trajectory
+        traj_energies_all = energies.reshape(B, T).mean(dim=1)
+    else:
+        # Normal trajectory mode
+        B = B_state
+        T = T_state
+        hand_states = state.hand_states
+        object_states = state.object_states
+        traj_energies_all = energies
 
     for asset_idx in range(len(args.object_code_list)):
         start_idx = asset_idx * args.batch_size
         end_idx = (asset_idx + 1) * args.batch_size
 
         # Get trajectories for this asset
-        traj_hand = state.hand_states[start_idx:end_idx].detach().cpu()  # (B, T, D)
-        traj_obj = state.object_states[start_idx:end_idx].detach().cpu()  # (B, T, 7)
-        traj_energies = energies[start_idx:end_idx].detach().cpu()
+        traj_hand = hand_states[start_idx:end_idx].detach().cpu()  # (B, T, D)
+        traj_obj = object_states[start_idx:end_idx].detach().cpu()  # (B, T, 7)
+        traj_energies = traj_energies_all[start_idx:end_idx].detach().cpu()
 
         # === LEGACY FIELDS (last frame, for backward compat) ===
         last_frame = traj_hand[:, -1]  # (B, D_hand)
@@ -271,7 +296,13 @@ def export_trajectory(
         # === COST BREAKDOWN ===
         breakdown = {}
         for name, values in cost_breakdown.items():
-            breakdown[name] = values[start_idx:end_idx].detach().cpu()
+            if sanity_check_mode:
+                # In sanity check mode, values are (B*T,), reshape to (B, T) and take mean
+                flat_start = asset_idx * args.batch_size * T
+                flat_end = (asset_idx + 1) * args.batch_size * T
+                breakdown[name] = values[flat_start:flat_end].reshape(args.batch_size, T).mean(dim=1).detach().cpu()
+            else:
+                breakdown[name] = values[start_idx:end_idx].detach().cpu()
 
         # Get contact indices for this batch (per-trajectory, not expanded)
         # contact_point_indices is (B*T, n_contacts), we need (B, n_contacts)
@@ -300,7 +331,8 @@ def export_trajectory(
             "cost_breakdown": breakdown,
             # Metadata
             "metadata": {
-                "optimizer": "MalaStarTrajectoryOptimizer",
+                "optimizer": args.optimizer,
+                "sanity_check_mode": sanity_check_mode,
                 "n_iters": args.n_iter,
                 "n_frames": T,
                 "hand_name": args.hand_name,

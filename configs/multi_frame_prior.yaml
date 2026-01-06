@@ -10,7 +10,7 @@ contact: {mode: uniform}
 priors:
   # Frame 0: Initial contact - palm facing down toward object
   - translation: [0.0, 0.0, 0.10]  # Directly above object
-    quaternion: [0.0, 1.0, 0.0, 0.0]  # Palm facing down (180° around Y)
+    rotation: [0.0, 1.0, 0.0, 0.0]  # 180° around X (palm facing down)
     joints:
       index_joint_0: 0.0
       index_joint_1: 0.6
@@ -31,7 +31,7 @@ priors:
 
   # Frame 1: Grasp secured - rotated 45° around Z
   - translation: [0.02, 0.02, 0.08]  # Slightly offset
-    quaternion: [0.38, 0.92, 0.0, 0.0]  # Rotated ~45° around Z from palm-down
+    rotation: [0.38, 0.92, 0.0, 0.0]  # Rotated ~45° from frame 0
     joints:
       index_joint_0: 0.0
       index_joint_1: 0.75
@@ -52,7 +52,7 @@ priors:
 
   # Frame 2: Rotating object - 90° rotation, tilting
   - translation: [0.05, 0.0, 0.06]  # Moving to side
-    quaternion: [0.5, 0.5, 0.5, 0.5]  # Significant rotation - palm now facing side
+    rotation: [0.5, 0.5, 0.5, 0.5]  # Significant rotation - palm now facing side
     joints:
       index_joint_0: 0.0
       index_joint_1: 0.8
@@ -73,7 +73,7 @@ priors:
 
   # Frame 3: Final position - 135° total rotation, palm nearly facing up
   - translation: [0.04, -0.03, 0.05]  # Offset to other side
-    quaternion: [0.71, 0.0, 0.71, 0.0]  # Palm facing mostly up/sideways
+    rotation: [0.71, 0.0, 0.71, 0.0]  # Palm facing mostly up/sideways
     joints:
       index_joint_0: -0.05
       index_joint_1: 0.85
