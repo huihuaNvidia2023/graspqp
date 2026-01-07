@@ -109,6 +109,8 @@ def parse_args():
     parser.add_argument("--max_lambda_limit", default=20.0, type=float)
     parser.add_argument("--n_friction_cone", default=4, type=int)
     parser.add_argument("--energy_name", default="trajectory", type=str)
+    parser.add_argument("--per_frame_contacts", action="store_true",
+                        help="Use independent contacts per frame (better for large rotations)")
 
     # Output
     parser.add_argument("--profile", action="store_true")
@@ -460,21 +462,33 @@ def main():
         hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts)
         print(f"  Hand model configured for {flat_batch_size} independent samples")
     else:
-        # TRAJECTORY MODE: Same contacts for all frames in each trajectory
-        # Shape: (B, n_contacts) - same contacts for all T frames in each trajectory
-        initial_contacts_per_traj = torch.randint(
-            hand_model.n_contact_candidates,
-            size=(total_batch_size, args.n_contact),
-            device=device,
-        )
-        # Expand to (B*T, n_contacts) for batched FK across all frames
-        initial_contacts = (
-            initial_contacts_per_traj.unsqueeze(1)
-            .expand(total_batch_size, T, args.n_contact)
-            .reshape(total_batch_size * T, args.n_contact)
-        )
-        # Flatten hand states for initialization: (B, T, D) -> (B*T, D)
+        # TRAJECTORY MODE: Contact handling depends on --per_frame_contacts
         flat_reference = reference_hand.reshape(total_batch_size * T, -1)
+        
+        if args.per_frame_contacts:
+            # PER-FRAME CONTACTS: Each frame has independent contacts (like sanity check)
+            # Better for trajectories with large rotation changes
+            initial_contacts = torch.randint(
+                hand_model.n_contact_candidates,
+                size=(total_batch_size * T, args.n_contact),
+                device=device,
+            )
+            print(f"  Per-frame contacts: {total_batch_size * T} independent contact sets")
+        else:
+            # SHARED CONTACTS: Same contacts for all frames in each trajectory
+            # Shape: (B, n_contacts) - same contacts for all T frames in each trajectory
+            initial_contacts_per_traj = torch.randint(
+                hand_model.n_contact_candidates,
+                size=(total_batch_size, args.n_contact),
+                device=device,
+            )
+            # Expand to (B*T, n_contacts) for batched FK across all frames
+            initial_contacts = (
+                initial_contacts_per_traj.unsqueeze(1)
+                .expand(total_batch_size, T, args.n_contact)
+                .reshape(total_batch_size * T, args.n_contact)
+            )
+            print(f"  Shared contacts per trajectory: {total_batch_size} contact sets expanded to {total_batch_size * T}")
 
         # Set hand model with all B*T samples
         hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts)

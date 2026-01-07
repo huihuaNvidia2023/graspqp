@@ -1,0 +1,100 @@
+# Refinement prior for video post-processing
+#
+# USE CASE: Hand already grasping, small adjustments between frames
+# - All frames have similar pose (mimics noisy video extraction)
+# - Small jitter simulates video noise
+# - Optimizer refines contacts while preserving trajectory shape
+
+contact: {mode: uniform}
+
+priors:
+  # Frame 0: Base grasp pose
+  - translation: [0.05, 0.0, 0.05]  # Hand near object
+    rotation: [0.707, 0.707, 0.0, 0.0]  # 90° around X (palm facing object)
+    joints:
+      index_joint_0: 0.0
+      index_joint_1: 0.7
+      index_joint_2: 0.9
+      index_joint_3: 0.7
+      middle_joint_0: 0.0
+      middle_joint_1: 0.7
+      middle_joint_2: 0.9
+      middle_joint_3: 0.7
+      ring_joint_0: 0.0
+      ring_joint_1: 0.7
+      ring_joint_2: 0.9
+      ring_joint_3: 0.7
+      thumb_joint_0: 1.1
+      thumb_joint_1: 0.55
+      thumb_joint_2: 0.65
+      thumb_joint_3: 0.25
+
+  # Frame 1: Tiny perturbation (simulates video noise)
+  - translation: [0.052, 0.002, 0.048]  # 2-3mm noise
+    rotation: [0.71, 0.70, 0.01, 0.01]  # ~1° noise
+    joints:
+      index_joint_0: 0.01
+      index_joint_1: 0.72
+      index_joint_2: 0.91
+      index_joint_3: 0.71
+      middle_joint_0: -0.01
+      middle_joint_1: 0.69
+      middle_joint_2: 0.89
+      middle_joint_3: 0.69
+      ring_joint_0: 0.01
+      ring_joint_1: 0.71
+      ring_joint_2: 0.91
+      ring_joint_3: 0.71
+      thumb_joint_0: 1.11
+      thumb_joint_1: 0.56
+      thumb_joint_2: 0.66
+      thumb_joint_3: 0.26
+
+  # Frame 2: Another tiny perturbation
+  - translation: [0.048, -0.001, 0.052]
+    rotation: [0.705, 0.71, -0.01, 0.0]
+    joints:
+      index_joint_0: -0.01
+      index_joint_1: 0.68
+      index_joint_2: 0.88
+      index_joint_3: 0.68
+      middle_joint_0: 0.01
+      middle_joint_1: 0.71
+      middle_joint_2: 0.91
+      middle_joint_3: 0.71
+      ring_joint_0: -0.01
+      ring_joint_1: 0.69
+      ring_joint_2: 0.89
+      ring_joint_3: 0.69
+      thumb_joint_0: 1.09
+      thumb_joint_1: 0.54
+      thumb_joint_2: 0.64
+      thumb_joint_3: 0.24
+
+  # Frame 3: Another tiny perturbation
+  - translation: [0.051, 0.001, 0.049]
+    rotation: [0.708, 0.705, 0.0, -0.01]
+    joints:
+      index_joint_0: 0.0
+      index_joint_1: 0.7
+      index_joint_2: 0.9
+      index_joint_3: 0.7
+      middle_joint_0: 0.0
+      middle_joint_1: 0.7
+      middle_joint_2: 0.9
+      middle_joint_3: 0.7
+      ring_joint_0: 0.0
+      ring_joint_1: 0.7
+      ring_joint_2: 0.9
+      ring_joint_3: 0.7
+      thumb_joint_0: 1.1
+      thumb_joint_1: 0.55
+      thumb_joint_2: 0.65
+      thumb_joint_3: 0.25
+
+# Small jitter for batch diversity
+jitter_translation: 0.005  # 5mm
+jitter_rotation: 0.02
+jitter_joints: 0.02
+prior_weight: 10.0
+dt: 0.1
