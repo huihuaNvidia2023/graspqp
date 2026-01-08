@@ -31,7 +31,7 @@ class AdamOptimizer(Optimizer):
         weight_decay: L2 regularization (default: 0)
         debug: Enable debug output (default: False)
         min_grad_norm: Minimum gradient norm to prevent vanishing (default: 0, disabled)
-        
+
     Adaptive contact resampling:
         resample_contacts: Enable contact resampling for stuck batches (default: False)
         resample_interval: Check for stuck batches every N steps (default: 50)
@@ -58,7 +58,7 @@ class AdamOptimizer(Optimizer):
         self.weight_decay = weight_decay
         self.debug = debug
         self.min_grad_norm = min_grad_norm
-        
+
         # Adaptive contact resampling
         self.resample_contacts = resample_contacts
         self.resample_interval = resample_interval
@@ -68,7 +68,7 @@ class AdamOptimizer(Optimizer):
         self._hand_param: Optional[Tensor] = None
         self._object_param: Optional[Tensor] = None
         self._internal_optimizer: Optional[Adam] = None
-        
+
         # Energy tracking for adaptive resampling
         self._current_energy: Optional[Tensor] = None
         self._best_energy: Optional[Tensor] = None
@@ -133,13 +133,13 @@ class AdamOptimizer(Optimizer):
         # CRITICAL: Enable gradient mode in context
         # This prevents set_parameters from cloning tensors, preserving gradient flow
         problem.context._skip_set_parameters = True
-        
+
         # For trajectory mode (T > 1), we need to configure hand_model with flattened params
         # so that FK and contact points are computed correctly
         hand_model = problem.context.hand_model
         B, T, D = self._hand_param.shape
         flat_hand = self._hand_param.reshape(B * T, D)
-        
+
         # Set hand_model.hand_pose to our parameter tensor (for gradient flow)
         hand_model.hand_pose = flat_hand
 
@@ -192,7 +192,7 @@ class AdamOptimizer(Optimizer):
         optimizer.step()
 
         self._step_count += 1
-        
+
         # Track energy for adaptive resampling
         self._current_energy = energy.detach()
         if self._best_energy is None:
@@ -236,7 +236,7 @@ class AdamOptimizer(Optimizer):
             self._resample_stuck_contacts(result_state, problem)
 
         return result_state
-    
+
     def _resample_stuck_contacts(
         self,
         state: "TrajectoryState",
@@ -244,34 +244,36 @@ class AdamOptimizer(Optimizer):
     ) -> None:
         """
         Resample contacts for batches that are stuck at high energy.
-        
+
         A batch is considered "stuck" if its current energy is significantly
         higher than the best energy seen so far (controlled by resample_threshold).
         """
         if self._current_energy is None or self._best_energy is None:
             return
-            
+
         hand_model = problem.context.hand_model
-        
+
         # Find best energy across all batches as reference
         global_best = self._best_energy.min()
-        
+
         # Identify stuck batches: energy > global_best * threshold
         stuck_mask = self._current_energy > global_best * self.resample_threshold
         n_stuck = stuck_mask.sum().item()
-        
+
         if n_stuck == 0:
             return
-            
+
         if self.debug:
-            print(f"\n[AdamOptimizer] Resampling contacts for {n_stuck} stuck batches "
-                  f"(threshold={self.resample_threshold}x, global_best={global_best.item():.2f})")
-        
+            print(
+                f"\n[AdamOptimizer] Resampling contacts for {n_stuck} stuck batches "
+                f"(threshold={self.resample_threshold}x, global_best={global_best.item():.2f})"
+            )
+
         # Get current contact indices
         current_contacts = hand_model.contact_point_indices  # (B, n_contacts) or (B*T, n_contacts)
         n_contacts = current_contacts.shape[-1]
         device = current_contacts.device
-        
+
         # Handle T > 1 case
         B = state.B
         T = state.T
@@ -280,7 +282,7 @@ class AdamOptimizer(Optimizer):
             stuck_mask_expanded = stuck_mask.unsqueeze(1).expand(B, T).reshape(B * T)
         else:
             stuck_mask_expanded = stuck_mask
-        
+
         # Sample new contacts for stuck batches
         if problem.context.contact_sampler is not None:
             # Use contact sampler (respects finger constraints)
@@ -293,14 +295,14 @@ class AdamOptimizer(Optimizer):
             n_resample = stuck_mask_expanded.sum().item()
             new_contacts = torch.randint(n_candidates, size=(n_resample, n_contacts), device=device)
             current_contacts[stuck_mask_expanded] = new_contacts
-        
+
         # Update hand model with new contacts
         hand_model.contact_point_indices = current_contacts
         problem.context.set_contact_indices(current_contacts)
-        
+
         # Reset best energy for resampled batches (give them a fresh start)
-        self._best_energy[stuck_mask] = float('inf')
-        
+        self._best_energy[stuck_mask] = float("inf")
+
         if self.debug:
             print(f"  Resampled {n_resample} contact sets")
 

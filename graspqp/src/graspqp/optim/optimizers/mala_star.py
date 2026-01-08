@@ -332,7 +332,7 @@ class MalaStarOptimizer(Optimizer):
         # MALA* already called set_parameters which configured contact points,
         # so we don't need to recompute them in ensure_hand_configured
         problem.context._recompute_contacts = False
-        
+
         # CRITICAL: Mark hand as already configured so ensure_hand_configured skips FK entirely.
         # set_parameters already did FK and computed contact points with the correct gradient graph.
         # If we re-do FK in ensure_hand_configured, it would disconnect the contact_points from

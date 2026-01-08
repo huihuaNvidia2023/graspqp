@@ -59,14 +59,11 @@ def parse_args():
     parser.add_argument("--lr", default=0.01, type=float, help="Learning rate")
     parser.add_argument("--beta1", default=0.9, type=float)
     parser.add_argument("--beta2", default=0.999, type=float)
-    
+
     # Adaptive contact resampling
-    parser.add_argument("--resample_contacts", action="store_true", 
-                        help="Enable contact resampling for stuck batches")
-    parser.add_argument("--resample_interval", default=50, type=int,
-                        help="Check for stuck batches every N steps")
-    parser.add_argument("--resample_threshold", default=3.0, type=float,
-                        help="Resample if energy > best * threshold")
+    parser.add_argument("--resample_contacts", action="store_true", help="Enable contact resampling for stuck batches")
+    parser.add_argument("--resample_interval", default=50, type=int, help="Check for stuck batches every N steps")
+    parser.add_argument("--resample_threshold", default=3.0, type=float, help="Resample if energy > best * threshold")
 
     # Initialization
     parser.add_argument("--jitter_strength", default=0.1, type=float)
@@ -96,8 +93,12 @@ def parse_args():
     )
     parser.add_argument("--debug", action="store_true", help="Enable verbose debug output")
     parser.add_argument("--profile", action="store_true", help="Enable detailed profiling")
-    parser.add_argument("--fc_threshold", default=0.01, type=float, 
-                        help="Contact distance threshold for force closure (None=always compute)")
+    parser.add_argument(
+        "--fc_threshold",
+        default=0.01,
+        type=float,
+        help="Contact distance threshold for force closure (None=always compute)",
+    )
 
     return parser.parse_args()
 
@@ -210,14 +211,14 @@ def main():
         device=device,
         profiler=profiler,
     )
-    
+
     # Set up contact sampler with finger constraints
     # Try from reference first, then infer from current contacts
     sampler = context.create_contact_sampler_from_reference()
     if sampler is None:
         # Infer finger constraints from current contact indices
         sampler = context.create_contact_sampler_from_current_contacts()
-    
+
     if context.contact_sampler is not None:
         print(f"  Contact sampler: configured")
         if context._contact_fingers:
@@ -277,7 +278,9 @@ def main():
     )
     print(f"\nOptimizer: AdamOptimizer (lr={args.lr})")
     if args.resample_contacts:
-        print(f"  Contact resampling: enabled (interval={args.resample_interval}, threshold={args.resample_threshold}x)")
+        print(
+            f"  Contact resampling: enabled (interval={args.resample_interval}, threshold={args.resample_threshold}x)"
+        )
 
     # IMPORTANT: Initialize optimizer with state (creates persistent params)
     print("\nInitializing optimizer...")
@@ -304,6 +307,7 @@ def main():
     energy_history = []
 
     import time
+
     start_time = time.perf_counter()
 
     for step in tqdm(range(1, args.n_iter + 1), desc="Optimizing"):
@@ -332,7 +336,7 @@ def main():
                 print(f"  Energy: mean={energy.mean().item():.4f}, best={energy.min().item():.4f}")
                 print(f"  Hand state change: {hand_change:.6f}")
 
-                # Note: After optimizer.step(), the internal params are new tensors 
+                # Note: After optimizer.step(), the internal params are new tensors
                 # (created via detach().clone()), so grad is None. This is expected.
                 # The gradient existed during backward() but is cleared when new tensors are created.
                 # Energy decrease confirms gradient flow is working.
@@ -408,7 +412,9 @@ def main():
     print("\n=== Optimization Summary ===")
     print(f"Initial energy: {energy_history[0]:.4f}")
     print(f"Final energy: {energy_history[-1]:.4f}")
-    print(f"Energy reduction: {energy_history[0] - energy_history[-1]:.4f} ({(1 - energy_history[-1]/energy_history[0])*100:.1f}%)")
+    print(
+        f"Energy reduction: {energy_history[0] - energy_history[-1]:.4f} ({(1 - energy_history[-1]/energy_history[0])*100:.1f}%)"
+    )
     print(f"\nTiming: {total_time:.2f}s total, {total_time * 1000 / args.n_iter:.2f}ms/iter")
 
     # Profiler summary

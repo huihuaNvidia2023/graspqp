@@ -109,8 +109,11 @@ def parse_args():
     parser.add_argument("--max_lambda_limit", default=20.0, type=float)
     parser.add_argument("--n_friction_cone", default=4, type=int)
     parser.add_argument("--energy_name", default="trajectory", type=str)
-    parser.add_argument("--per_frame_contacts", action="store_true",
-                        help="Use independent contacts per frame (better for large rotations)")
+    parser.add_argument(
+        "--per_frame_contacts",
+        action="store_true",
+        help="Use independent contacts per frame (better for large rotations)",
+    )
 
     # Output
     parser.add_argument("--profile", action="store_true")
@@ -234,16 +237,16 @@ def export_trajectory(
     Export trajectory in extended format compatible with visualize_result.py.
 
     Format follows docs/OPTIMIZATION_FRAMEWORK_DESIGN.md.
-    
+
     Handles both trajectory mode (B, T, D) and sanity check mode (B*T, 1, D).
     In sanity check mode, unflattens back to (B, T, D) using args.n_frames.
     """
     B_state, T_state, D_hand = state.hand_states.shape
-    
+
     # Detect sanity check mode: state has T=1 but args.n_frames > 1
     # In this case, B_state is actually B*T flattened
     sanity_check_mode = T_state == 1 and args.n_frames > 1
-    
+
     if sanity_check_mode:
         # Unflatten: (B*T, 1, D) -> (B, T, D)
         T = args.n_frames
@@ -464,7 +467,7 @@ def main():
     else:
         # TRAJECTORY MODE: Contact handling depends on --per_frame_contacts
         flat_reference = reference_hand.reshape(total_batch_size * T, -1)
-        
+
         if args.per_frame_contacts:
             # PER-FRAME CONTACTS: Each frame has independent contacts (like sanity check)
             # Better for trajectories with large rotation changes
@@ -488,7 +491,9 @@ def main():
                 .expand(total_batch_size, T, args.n_contact)
                 .reshape(total_batch_size * T, args.n_contact)
             )
-            print(f"  Shared contacts per trajectory: {total_batch_size} contact sets expanded to {total_batch_size * T}")
+            print(
+                f"  Shared contacts per trajectory: {total_batch_size} contact sets expanded to {total_batch_size * T}"
+            )
 
         # Set hand model with all B*T samples
         hand_model.set_parameters(flat_reference, contact_point_indices=initial_contacts)

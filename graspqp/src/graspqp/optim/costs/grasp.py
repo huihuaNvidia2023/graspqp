@@ -161,7 +161,7 @@ class ForceClosureCost(PerFrameCost):
         mean_distance = distance.abs().mean(dim=-1)  # (N,)
 
         # Determine which samples should compute QP
-        if self.contact_threshold is not None and self.contact_threshold < float('inf'):
+        if self.contact_threshold is not None and self.contact_threshold < float("inf"):
             in_contact_mask = mean_distance < self.contact_threshold  # (N,)
             n_in_contact = in_contact_mask.sum().item()
 

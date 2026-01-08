@@ -52,7 +52,7 @@ switch_mask = torch.rand(batch_size, n_contact) < switch_possibility
 3. **Joint Proposal Problem**
    ```
    Current: Propose (new_pose + new_contacts) → Evaluate → Accept/Reject both
-   
+
    Problem: Even if pose improvement is good, bad contact change can cause rejection
    ```
 
@@ -113,11 +113,11 @@ switch_mask = torch.rand(B) < switch_possibility
 # Warning when gradient is None (broken gradient flow)
 if grad is None:
     warnings.warn("Gradient is None after backward pass...")
-    
+
 # Warning when NaN in EMA gradient
 if self._ema_grad.isnan().any():
     warnings.warn(f"NaN detected in EMA gradient ({nan_count} values)...")
-    
+
 # Warning when NaN in proposed states
 if proposed_hand.isnan().any():
     warnings.warn(f"NaN detected in proposed hand states...")
@@ -161,7 +161,7 @@ if self._skip_set_parameters:
     self.hand_model.global_rotation = ...
     self.hand_model.current_status = self.hand_model.fk(flat_hand[:, 9:])
     self.hand_model.hand_pose = flat_hand
-    
+
     # CRITICAL: Recompute contact points from FK result!
     self.hand_model.all_contact_points, self.hand_model._all_contact_normals = (
         self.hand_model.get_contact_candidates(with_normals=True)

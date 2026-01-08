@@ -14,8 +14,8 @@ This optimizer treats the trajectory as a single optimization unit.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Any, Dict, Optional
 import warnings
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
 from torch import Tensor
@@ -176,7 +176,7 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                 warnings.warn(
                     "Gradient is None after backward pass. This indicates broken gradient flow - "
                     "check that costs are differentiable and don't detach tensors.",
-                    RuntimeWarning
+                    RuntimeWarning,
                 )
                 grad = torch.zeros_like(state.hand_states)
 
@@ -196,7 +196,7 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                 warnings.warn(
                     f"NaN detected in EMA gradient ({nan_count} values). "
                     "This may indicate numerical instability in cost computation.",
-                    RuntimeWarning
+                    RuntimeWarning,
                 )
                 self._ema_grad[torch.isnan(self._ema_grad)] = 0
 
@@ -215,7 +215,7 @@ class MalaStarTrajectoryOptimizer(Optimizer):
                     warnings.warn(
                         f"NaN detected in proposed hand states ({nan_batch_count}/{nan_mask.shape[0]} batches). "
                         "Reverting affected batches to previous state.",
-                        RuntimeWarning
+                        RuntimeWarning,
                     )
                     proposed_hand[nan_mask] = state.hand_states[nan_mask]
 

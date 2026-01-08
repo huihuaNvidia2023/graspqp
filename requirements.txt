@@ -6,14 +6,16 @@ transforms3d
 plotly
 roma
 pyaml
+pyyaml
 six
 lxml
 "git+https://github.com/facebookresearch/pytorch3d.git"
 warp_lang
-pip install -e .     thirdparty/torchsdf
+thirdparty/torchsdf
 scipy
 rtree
 wandb
 qpth
 pytest
 matplotlib
+viser>=0.2.0viser>=0.2.0
