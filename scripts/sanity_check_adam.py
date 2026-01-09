@@ -40,25 +40,25 @@ from graspqp.utils.transforms import robust_compute_rotation_matrix_from_ortho6d
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Adam Optimizer Sanity Check")
-    parser.add_argument("--seed", default=1, type=int)
-    parser.add_argument("--object_code_list", default=["apple"], nargs="+")
-    parser.add_argument("--n_contact", default=8, type=int)
-    parser.add_argument("--batch_size", default=4, type=int)
-    parser.add_argument("--n_iter", default=200, type=int)
+    parser.add_argument("--seed", default=1, type=int, help="Random seed for reproducibility")
+    parser.add_argument("--object_code_list", default=["apple"], nargs="+", help="List of object codes to optimize grasps for")
+    parser.add_argument("--n_contact", default=8, type=int, help="Number of contact points per grasp")
+    parser.add_argument("--batch_size", default=4, type=int, help="Number of grasp samples per object")
+    parser.add_argument("--n_iter", default=200, type=int, help="Number of optimization iterations")
 
     # Weights
-    parser.add_argument("--w_dis", default=100.0, type=float)
-    parser.add_argument("--w_fc", default=0.0, type=float, help="Force closure (disable for debugging)")
-    parser.add_argument("--w_pen", default=100.0, type=float)
-    parser.add_argument("--w_spen", default=10.0, type=float)
-    parser.add_argument("--w_joints", default=1.0, type=float)
-    parser.add_argument("--w_prior", default=10.0, type=float)
-    parser.add_argument("--w_svd", default=0.1, type=float)
+    parser.add_argument("--w_dis", default=10.0, type=float, help="Weight for contact distance cost")
+    parser.add_argument("--w_fc", default=1.0, type=float, help="Weight for force closure cost (0 to disable)")
+    parser.add_argument("--w_pen", default=10.0, type=float, help="Weight for hand-object penetration cost")
+    parser.add_argument("--w_spen", default=10.0, type=float, help="Weight for self-penetration cost")
+    parser.add_argument("--w_joints", default=1.0, type=float, help="Weight for joint limit violation cost")
+    parser.add_argument("--w_prior", default=10.0, type=float, help="Weight for prior pose deviation cost")
+    parser.add_argument("--w_svd", default=0.1, type=float, help="SVD regularization gain for force closure QP")
 
     # Adam settings
-    parser.add_argument("--lr", default=0.01, type=float, help="Learning rate")
-    parser.add_argument("--beta1", default=0.9, type=float)
-    parser.add_argument("--beta2", default=0.999, type=float)
+    parser.add_argument("--lr", default=0.01, type=float, help="Learning rate for Adam optimizer")
+    parser.add_argument("--beta1", default=0.9, type=float, help="Adam beta1 (exponential decay for 1st moment)")
+    parser.add_argument("--beta2", default=0.999, type=float, help="Adam beta2 (exponential decay for 2nd moment)")
 
     # Adaptive contact resampling
     parser.add_argument("--resample_contacts", action="store_true", help="Enable contact resampling for stuck batches")
@@ -157,17 +157,22 @@ def main():
     initialize_convex_hull(hand_model, object_model, args)
 
     # =========================================================================
-    # 2. Load prior pose
+    # 2. Load prior pose and object state
     # =========================================================================
     prior_pose = None
+    prior_object_state = None
     if args.prior_file is not None:
         print(f"\nLoading prior from: {args.prior_file}")
         prior_config = GraspPriorLoader.load_from_file(args.prior_file)
 
-        if prior_config.priors:
+        if prior_config.hands:  # Use .hands (new name) or .priors (legacy alias)
             prior_data = GraspPriorLoader.expand_priors(prior_config, total_batch_size, hand_model, device)
             prior_pose = GraspPriorLoader.create_hand_pose_from_priors(prior_data)
-            print(f"  Loaded prior: shape={prior_pose.shape}")
+            prior_object_state = GraspPriorLoader.create_object_state_from_priors(prior_data)
+            print(f"  Loaded hand prior: shape={prior_pose.shape}")
+            print(f"  Loaded object state: shape={prior_object_state.shape}")
+            print(f"    Object translation: {prior_object_state[0, :3].tolist()}")
+            print(f"    Object rotation (qxyzw): {prior_object_state[0, 3:7].tolist()}")
 
     # Override with prior if using prior init mode
     if args.init_mode == "prior" and prior_pose is not None:
@@ -183,31 +188,53 @@ def main():
     D_obj = 7
 
     initial_hand = hand_model.hand_pose.detach().clone()
-    object_at_origin = torch.zeros(total_batch_size, 1, D_obj, device=device)
-    object_at_origin[:, :, 6] = 1.0
+
+    # Get object state from prior if available, otherwise use default (origin)
+    if prior_object_state is not None:
+        object_state = prior_object_state.unsqueeze(1)  # (B, 1, 7)
+    else:
+        object_state = GraspPriorLoader.get_default_object_state(total_batch_size, device).unsqueeze(1)
 
     state = TrajectoryState(
         hand_states=initial_hand.unsqueeze(1),
-        object_states=object_at_origin,
+        object_states=object_state,
     )
     print(f"\nTrajectoryState: B={state.B}, T={state.T}, D_hand={state.D_hand}")
 
     # =========================================================================
     # 4. Create OptimizationContext
     # =========================================================================
+    # Get contact finger constraints from prior config
+    contact_fingers = None
+    contact_mode = "uniform"  # Default
+    if args.prior_file is not None and prior_config is not None:
+        contact_mode = prior_config.contact.mode
+        # Check global contact config first
+        if prior_config.contact.links:
+            contact_fingers = prior_config.contact.links
+        # Per-hand contact_links override (use first hand's config)
+        elif prior_config.hands and prior_config.hands[0].contact_links:
+            contact_fingers = prior_config.hands[0].contact_links
+
+    if contact_fingers:
+        print(f"  Contact mode: {contact_mode}")
+        print(f"  Contact fingers from prior: {contact_fingers}")
+    else:
+        print(f"  Contact mode: {contact_mode} (all fingers)")
+
     if prior_pose is not None:
         reference = ReferenceTrajectory(
             hand_states=prior_pose.unsqueeze(1),
-            object_states=object_at_origin.clone(),
-            contact_fingers=None,
+            object_states=object_state.clone(),
+            contact_fingers=contact_fingers,
             n_contacts=args.n_contact,
             hand_type=args.hand_name,
         )
     else:
         reference = ReferenceTrajectory(
             hand_states=initial_hand.unsqueeze(1),
-            object_states=object_at_origin.clone(),
-            contact_fingers=None,
+            object_states=object_state.clone(),
+            contact_fingers=contact_fingers,
             n_contacts=args.n_contact,
             hand_type=args.hand_name,
         )
@@ -220,19 +247,18 @@ def main():
         profiler=profiler,
     )
 
-    # Set up contact sampler with finger constraints
-    # Try from reference first, then infer from current contacts
-    sampler = context.create_contact_sampler_from_reference()
-    if sampler is None:
-        # Infer finger constraints from current contact indices
-        sampler = context.create_contact_sampler_from_current_contacts()
-
-    if context.contact_sampler is not None:
-        print(f"  Contact sampler: configured")
-        if context._contact_fingers:
-            print(f"    Allowed fingers: {context._contact_fingers}")
+    # Set up contact sampler based on prior config
+    # Only create constrained sampler if contact_fingers are specified
+    if contact_fingers:
+        sampler = context.create_contact_sampler_from_reference()
+        if context.contact_sampler is not None:
+            print(f"  Contact sampler: constrained to specified fingers")
+        else:
+            print(f"  Contact sampler: failed to create, falling back to uniform")
     else:
-        print(f"  Contact sampler: uniform (no finger constraints)")
+        # Use uniform sampling (no finger constraints) - don't infer from random contacts
+        sampler = None
+        print(f"  Contact sampler: uniform (all contact candidates)")
 
     # =========================================================================
     # 5. Create OptimizationProblem with costs
