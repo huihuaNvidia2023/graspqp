@@ -210,3 +210,8 @@ Additional docs:
 - Adding a new hand: [docs/adding_hand.md](docs/adding_hand.md)
 - Project page: [https://graspqp.github.io/](https://graspqp.github.io/)
 - Paper (arXiv): [https://arxiv.org/abs/2508.15002](https://arxiv.org/abs/2508.15002)
+
+
+
+# Conda activation
+source ~/anaconda3/etc/profile.d/conda.sh && conda activate graspqp

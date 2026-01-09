@@ -31,6 +31,10 @@ class AdamOptimizer(Optimizer):
         weight_decay: L2 regularization (default: 0)
         debug: Enable debug output (default: False)
         min_grad_norm: Minimum gradient norm to prevent vanishing (default: 0, disabled)
+        optimize_object: Whether to optimize object_states (default: False)
+            - False: Only optimize hand_states (Hand_T_Object), object stays fixed at origin.
+                     More efficient when reference trajectory is converted to object frame.
+            - True: Optimize both hand_states and object_states.
 
     Adaptive contact resampling:
         resample_contacts: Enable contact resampling for stuck batches (default: False)
@@ -46,6 +50,7 @@ class AdamOptimizer(Optimizer):
         weight_decay: float = 0,
         debug: bool = False,
         min_grad_norm: float = 0.0,
+        optimize_object: bool = False,
         resample_contacts: bool = False,
         resample_interval: int = 50,
         resample_threshold: float = 3.0,
@@ -58,6 +63,7 @@ class AdamOptimizer(Optimizer):
         self.weight_decay = weight_decay
         self.debug = debug
         self.min_grad_norm = min_grad_norm
+        self.optimize_object = optimize_object
 
         # Adaptive contact resampling
         self.resample_contacts = resample_contacts
@@ -83,11 +89,19 @@ class AdamOptimizer(Optimizer):
         """
         # Create persistent parameter tensors
         self._hand_param = state.hand_states.detach().clone().requires_grad_(True)
-        self._object_param = state.object_states.detach().clone().requires_grad_(True)
+
+        # Object param: only requires_grad if we're optimizing it
+        self._object_param = state.object_states.detach().clone()
+        if self.optimize_object:
+            self._object_param.requires_grad_(True)
 
         # Create the Adam optimizer ONCE
+        params = [self._hand_param]
+        if self.optimize_object:
+            params.append(self._object_param)
+
         self._internal_optimizer = Adam(
-            [self._hand_param, self._object_param],
+            params,
             lr=self.lr,
             betas=self.betas,
             eps=self.eps,
@@ -95,8 +109,10 @@ class AdamOptimizer(Optimizer):
         )
 
         if self.debug:
+            opt_vars = "hand_states only" if not self.optimize_object else "hand_states + object_states"
             print(
-                f"[AdamOptimizer] Initialized with hand_param shape={self._hand_param.shape}, "
+                f"[AdamOptimizer] Initialized: {opt_vars}, "
+                f"hand_param shape={self._hand_param.shape}, "
                 f"object_param shape={self._object_param.shape}"
             )
 
@@ -161,7 +177,7 @@ class AdamOptimizer(Optimizer):
             if grad_norm < self.min_grad_norm and grad_norm > 1e-10:
                 scale = self.min_grad_norm / grad_norm
                 self._hand_param.grad = hand_grad * scale
-                if self._object_param.grad is not None:
+                if self.optimize_object and self._object_param.grad is not None:
                     self._object_param.grad = self._object_param.grad * scale
                 if self.debug and self._step_count % 10 == 0:
                     print(
@@ -203,7 +219,10 @@ class AdamOptimizer(Optimizer):
         # Return state pointing to updated persistent params
         result_state = state.clone()
         result_state.hand_states = self._hand_param.detach().clone().requires_grad_(True)
-        result_state.object_states = self._object_param.detach().clone().requires_grad_(True)
+        if self.optimize_object:
+            result_state.object_states = self._object_param.detach().clone().requires_grad_(True)
+        else:
+            result_state.object_states = self._object_param.detach().clone()  # No grad needed
 
         # Update persistent params to the new values (for next step)
         self._hand_param = result_state.hand_states
@@ -211,8 +230,12 @@ class AdamOptimizer(Optimizer):
 
         # Re-create optimizer with new tensors but copy momentum state
         old_state = optimizer.state_dict()
+        params = [self._hand_param]
+        if self.optimize_object:
+            params.append(self._object_param)
+
         self._internal_optimizer = Adam(
-            [self._hand_param, self._object_param],
+            params,
             lr=self.lr,
             betas=self.betas,
             eps=self.eps,
@@ -314,9 +337,13 @@ class AdamOptimizer(Optimizer):
         """Fallback: create new optimizer each step (original behavior, loses momentum)."""
         state = state.clone()
         state.hand_states.requires_grad_(True)
-        state.object_states.requires_grad_(True)
+        if self.optimize_object:
+            state.object_states.requires_grad_(True)
 
-        params = [state.hand_states, state.object_states]
+        params = [state.hand_states]
+        if self.optimize_object:
+            params.append(state.object_states)
+
         optimizer = Adam(
             params,
             lr=self.lr,
@@ -366,6 +393,7 @@ class AdamOptimizer(Optimizer):
             {
                 "lr": self.lr,
                 "betas": self.betas,
+                "optimize_object": self.optimize_object,
                 "initialized": self._internal_optimizer is not None,
             }
         )
@@ -381,6 +409,7 @@ class SGDOptimizer(Optimizer):
         momentum: Momentum factor (default: 0.9)
         weight_decay: L2 regularization (default: 0)
         nesterov: Use Nesterov momentum (default: False)
+        optimize_object: Whether to optimize object_states (default: False)
     """
 
     def __init__(
@@ -389,6 +418,7 @@ class SGDOptimizer(Optimizer):
         momentum: float = 0.9,
         weight_decay: float = 0,
         nesterov: bool = False,
+        optimize_object: bool = False,
         config: Optional[Dict[str, Any]] = None,
     ):
         super().__init__(config)
@@ -396,6 +426,7 @@ class SGDOptimizer(Optimizer):
         self.momentum = momentum
         self.weight_decay = weight_decay
         self.nesterov = nesterov
+        self.optimize_object = optimize_object
 
     def _ensure_optimizer(self, params: List[Tensor]) -> SGD:
         """Create or update internal SGD optimizer."""
@@ -417,9 +448,13 @@ class SGDOptimizer(Optimizer):
         """Perform one SGD optimization step."""
         state = state.clone()
         state.hand_states.requires_grad_(True)
-        state.object_states.requires_grad_(True)
+        if self.optimize_object:
+            state.object_states.requires_grad_(True)
 
-        params = [state.hand_states, state.object_states]
+        params = [state.hand_states]
+        if self.optimize_object:
+            params.append(state.object_states)
+
         optimizer = self._ensure_optimizer(params)
 
         optimizer.zero_grad()
@@ -430,76 +465,6 @@ class SGDOptimizer(Optimizer):
         total.backward()
 
         optimizer.step()
-        self._step_count += 1
-
-        return state.detach()
-
-    def reset(self):
-        super().reset()
-
-
-class LBFGSOptimizer(Optimizer):
-    """
-    L-BFGS optimizer wrapper.
-
-    Note: L-BFGS requires a closure and may take multiple function evaluations
-    per step. Use with caution for large problems.
-
-    Config options:
-        lr: Learning rate (default: 1.0)
-        max_iter: Max iterations per step (default: 20)
-        history_size: History size for L-BFGS (default: 100)
-        line_search_fn: Line search function (default: "strong_wolfe")
-    """
-
-    def __init__(
-        self,
-        lr: float = 1.0,
-        max_iter: int = 20,
-        history_size: int = 100,
-        line_search_fn: str = "strong_wolfe",
-        config: Optional[Dict[str, Any]] = None,
-    ):
-        super().__init__(config)
-        self.lr = lr
-        self.max_iter = max_iter
-        self.history_size = history_size
-        self.line_search_fn = line_search_fn
-
-    def _ensure_optimizer(self, params: List[Tensor]) -> LBFGS:
-        """Create or update internal L-BFGS optimizer."""
-        # Always create new optimizer since params are new tensors each step
-        self._internal_optimizer = LBFGS(
-            params,
-            lr=self.lr,
-            max_iter=self.max_iter,
-            history_size=self.history_size,
-            line_search_fn=self.line_search_fn,
-        )
-        return self._internal_optimizer
-
-    def step(
-        self,
-        state: "TrajectoryState",
-        problem: "OptimizationProblem",
-    ) -> "TrajectoryState":
-        """Perform one L-BFGS optimization step."""
-        state = state.clone()
-        state.hand_states.requires_grad_(True)
-        state.object_states.requires_grad_(True)
-
-        params = [state.hand_states, state.object_states]
-        optimizer = self._ensure_optimizer(params)
-
-        def closure():
-            optimizer.zero_grad()
-            problem.context.clear_step_cache()
-            energy = problem.total_energy(state)
-            total = energy.sum()
-            total.backward()
-            return total
-
-        optimizer.step(closure)
         self._step_count += 1
 
         return state.detach()

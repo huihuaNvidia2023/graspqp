@@ -65,6 +65,14 @@ def parse_args():
     parser.add_argument("--resample_interval", default=50, type=int, help="Check for stuck batches every N steps")
     parser.add_argument("--resample_threshold", default=3.0, type=float, help="Resample if energy > best * threshold")
 
+    # Optimization variables
+    parser.add_argument(
+        "--optimize_object",
+        action="store_true",
+        help="Optimize object_states in addition to hand_states. "
+        "Default is False (only optimize hand-to-object transform, object fixed at origin)",
+    )
+
     # Initialization
     parser.add_argument("--jitter_strength", default=0.1, type=float)
     parser.add_argument("--distance_lower", default=0.05, type=float)
@@ -272,11 +280,13 @@ def main():
         lr=args.lr,
         betas=(args.beta1, args.beta2),
         debug=args.debug,
+        optimize_object=args.optimize_object,
         resample_contacts=args.resample_contacts,
         resample_interval=args.resample_interval,
         resample_threshold=args.resample_threshold,
     )
-    print(f"\nOptimizer: AdamOptimizer (lr={args.lr})")
+    opt_vars = "hand + object" if args.optimize_object else "hand only (object fixed at origin)"
+    print(f"\nOptimizer: AdamOptimizer (lr={args.lr}, optimizing: {opt_vars})")
     if args.resample_contacts:
         print(
             f"  Contact resampling: enabled (interval={args.resample_interval}, threshold={args.resample_threshold}x)"
@@ -362,7 +372,8 @@ def main():
     # 10. Export results
     # =========================================================================
     # Update hand_model with final state for export
-    final_hand = state.hand_states.squeeze(1)  # (B, D)
+    # IMPORTANT: detach() to remove gradient tracking before saving
+    final_hand = state.hand_states.squeeze(1).detach()  # (B, D)
     hand_model.set_parameters(final_hand, hand_model.contact_point_indices)
 
     # Create output directory
@@ -382,17 +393,25 @@ def main():
     hand_qwxyz = hand_qxyzw[:, [3, 0, 1, 2]]
     root_pose = torch.cat([final_hand[:, :3], hand_qwxyz], dim=1)
 
+    # Find object mesh path for viewer
+    object_mesh_path = os.path.join(args.data_root_path, args.object_code_list[0], f"{args.object_code_list[0]}_scaled.obj")
+    if not os.path.exists(object_mesh_path):
+        # Try without _scaled suffix
+        object_mesh_path = os.path.join(args.data_root_path, args.object_code_list[0], f"{args.object_code_list[0]}.obj")
+
     data = {
-        "values": final_energy.cpu(),
+        "values": final_energy.detach().cpu(),
         "parameters": {
-            "root_pose": root_pose.cpu(),
-            **{name: final_hand[:, 9 + i].cpu() for i, name in enumerate(hand_model._actuated_joints_names)},
+            "root_pose": root_pose.detach().cpu(),
+            **{name: final_hand[:, 9 + i].detach().cpu() for i, name in enumerate(hand_model._actuated_joints_names)},
         },
-        "contact_idx": hand_model.contact_point_indices.cpu(),
+        "contact_idx": hand_model.contact_point_indices.detach().cpu(),
         "contact_links": hand_model._contact_links,
         "metadata": {
             "hand_name": args.hand_name,
             "object_code": args.object_code_list[0],
+            "data_root_path": os.path.abspath(args.data_root_path),
+            "object_mesh_path": os.path.abspath(object_mesh_path) if os.path.exists(object_mesh_path) else "",
         },
     }
 
