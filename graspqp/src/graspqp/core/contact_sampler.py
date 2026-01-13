@@ -335,22 +335,50 @@ class HierarchicalContactSampler:
             min_needed_per_link = (n_contacts + n_links_in_pool - 1) // n_links_in_pool
             effective_max_per_link = max(effective_max_per_link, min_needed_per_link)
 
-        # First pass: distribute across selected fingers (ensuring diversity)
+        # FIRST: Ensure at least 1 contact per selected finger (round-robin diversity)
+        # This guarantees min_fingers constraint is satisfied
+        finger_links_sorted = {}  # Cache sorted links per finger
         for finger in selected_fingers:
+            if remaining_contacts <= 0:
+                break
             links = available_by_finger[finger]
             # Sort by priority (prefer distal/tip links)
             links_sorted = sorted(links, key=self._link_priority, reverse=True)
-
+            finger_links_sorted[finger] = links_sorted
+            
+            # Assign just 1 contact from this finger's best link
             for link in links_sorted:
+                n_available = len(self.link_to_indices[link])
+                if n_available > 0:
+                    result[link] = 1
+                    remaining_contacts -= 1
+                    break  # Move to next finger
+
+        # SECOND: Distribute remaining contacts FAIRLY across all selected fingers
+        # Use round-robin to ensure each finger gets contacts before any finger gets extras
+        while remaining_contacts > 0:
+            added_any = False
+            for finger in selected_fingers:
                 if remaining_contacts <= 0:
                     break
-
-                n_available = len(self.link_to_indices[link])
-                n_from_link = min(effective_max_per_link, n_available, remaining_contacts)
-
-                if n_from_link > 0:
-                    result[link] = n_from_link
-                    remaining_contacts -= n_from_link
+                    
+                links_sorted = finger_links_sorted.get(finger, [])
+                
+                # Try to add 1 more contact to this finger
+                for link in links_sorted:
+                    n_available = len(self.link_to_indices[link])
+                    current = result.get(link, 0)
+                    
+                    # Can we add one more to this link?
+                    if current < effective_max_per_link and current < n_available:
+                        result[link] = current + 1
+                        remaining_contacts -= 1
+                        added_any = True
+                        break  # Move to next finger
+            
+            # If we couldn't add any contacts in this round, break to avoid infinite loop
+            if not added_any:
+                break
 
         # Second pass: if still need more, sample from remaining finger links
         if remaining_contacts > 0:

@@ -408,6 +408,7 @@ class HandModel:
         contact_links=None,
         grasp_type=None,
         grasp_axis=None,
+        init_offset=None,
     ):
         """
         Create a Hand Model for a MJCF robot
@@ -465,6 +466,9 @@ class HandModel:
         self.up_axis = axis[up_axis]
 
         self.grasp_axis = axis[grasp_axis] if grasp_axis is not None else axis[forward_axis]
+        
+        # Init offset for positioning hand during initialization (in hand's local frame: [forward, up, left])
+        self.init_offset = init_offset
 
         self._joint_mask = None  # [0,2,4,6,8, 9]
         self._joint_filter = joint_filter

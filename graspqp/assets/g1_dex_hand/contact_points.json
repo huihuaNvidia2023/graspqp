@@ -1,0 +1,10 @@
+{
+    "right_hand_palm_link": [["contact/right_hand_palm_contact.obj", 4]],
+    "right_hand_thumb_0_link": [],
+    "right_hand_thumb_1_link": [["contact/right_hand_thumb_1_contact.obj", 8]],
+    "right_hand_thumb_2_link": [["contact/right_hand_thumb_2_contact.obj", 8]],
+    "right_hand_middle_0_link": [["contact/right_hand_middle_0_contact.obj", 8]],
+    "right_hand_middle_1_link": [["contact/right_hand_middle_1_contact.obj", 8]],
+    "right_hand_index_0_link": [["contact/right_hand_index_0_contact.obj", 8]],
+    "right_hand_index_1_link": [["contact/right_hand_index_1_contact.obj", 8]]
+}

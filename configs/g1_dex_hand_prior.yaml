@@ -1,0 +1,42 @@
+# Prior configuration for G1 Dex Hand grasp optimization
+# New format with explicit object state and hand poses
+
+# Object state in world frame (Object_T_World)
+# Default is at origin with identity rotation
+object:
+  translation: [0.0, 0.0, 0.0]
+  rotation: [1.0, 0.0, 0.0, 0.0]  # quaternion [w, x, y, z]
+
+# Hand poses relative to object frame (Hand_T_Object)
+# G1 dex hand configuration
+hands:
+  - name: right_hand
+    translation: [-0.08, 0.0, 0.0]
+    rotation: [0.707, 0.0, 0.707, 0.0]  # quaternion [w, x, y, z] - hand pointing forward
+    joints:
+      right_hand_thumb_0_joint: 0.0
+      right_hand_thumb_1_joint: 0.3
+      right_hand_thumb_2_joint: -0.3
+      right_hand_middle_0_joint: 0.5
+      right_hand_middle_1_joint: 0.5
+      right_hand_index_0_joint: 0.5
+      right_hand_index_1_joint: 0.5
+
+# Contact sampling configuration
+# Allow contacts on index, middle, and thumb fingers
+contact:
+  mode: constrained
+  links:
+    - right_hand_thumb_1_link
+    - right_hand_thumb_2_link
+    - right_hand_middle_0_link
+    - right_hand_middle_1_link
+    - right_hand_index_0_link
+    - right_hand_index_1_link
+  min_fingers: 2
+  max_contacts_per_link: 4
+
+# Jitter for batch diversity (applied to repeated priors)
+jitter_translation: 0.05
+jitter_rotation: 0.2
+jitter_joints: 0.2

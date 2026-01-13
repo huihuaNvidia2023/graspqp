@@ -1,0 +1,10 @@
+# G1 Dex Hand - Index finger link 1 (fingertip) contact surface
+# Actual mesh: X -0.007-0.052, Y -0.009-0.009, Z -0.013-0.013
+o right_hand_index_1_contact
+v 0.000 0.006 -0.010
+v 0.000 0.006 0.010
+v 0.048 0.006 -0.010
+v 0.048 0.006 0.010
+vn 0.0 1.0 0.0
+s 0
+f 1//1 2//1 4//1 3//1

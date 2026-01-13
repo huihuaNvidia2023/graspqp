@@ -1,0 +1,296 @@
+<?xml version="1.0"?>
+<robot name="g1_right_hand">
+
+    <!-- Root link (virtual, no geometry) -->
+    <link name="g1_hand"/>
+
+    <!-- Mount link -->
+    <link name="g1_hand_mount">
+        <inertial>
+            <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+            <mass value="0.05"/>
+            <inertia ixx="0." ixy="0." ixz="0." iyy="0." iyz="0." izz="0."/>
+        </inertial>
+    </link>
+
+    <!-- Root joint connecting root to mount -->
+    <joint name="root_joint" type="fixed">
+        <origin xyz="0. 0. 0." rpy="0. 0. 0."/>
+        <parent link="g1_hand"/>
+        <child link="g1_hand_mount"/>
+    </joint>
+
+    <!-- Mount joint connecting mount to palm -->
+    <!-- Offset to center origin between finger contact points (per adding_hand.md conventions) -->
+    <!-- Rotation around X by 90deg so Z axis points outward from palm -->
+    <joint name="g1_mount_joint" type="fixed">
+        <origin xyz="-0.07 0 -0.04" rpy="1.5708 0 0"/>
+        <parent link="g1_hand_mount"/>
+        <child link="right_hand_palm_link"/>
+    </joint>
+
+    <!-- Right Hand Palm (Root/Base Link) -->
+    <link name="right_hand_palm_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="0.06214634836 0.00050869656 -0.00058171093"/>
+            <mass value="0.37283854"/>
+            <inertia ixx="0.00027535181027" ixy="0.00001595519465" ixz="-0.00000242161890" iyy="0.00053951827219" iyz="0.00000042279435" izz="0.00039623390907"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_palm_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_palm_link.obj"/>
+            </geometry>
+        </collision>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_palm_link_extra_1.obj"/>
+            </geometry>
+        </collision>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_palm_link_extra_2.obj"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- Thumb -->
+    <joint name="right_hand_thumb_0_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0.0255 0 0"/>
+        <axis xyz="0 1 0"/>
+        <parent link="right_hand_palm_link"/>
+        <child link="right_hand_thumb_0_link"/>
+        <limit effort="2.45" lower="-1.04719755" upper="1.04719755" velocity="6.857"/>
+    </joint>
+    <link name="right_hand_thumb_0_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="-0.00088424580 0.00863407079 0.00094429336"/>
+            <mass value="0.08623657"/>
+            <inertia ixx="0.00001602919238" ixy="-0.00000010683177" ixz="0.00000016728875" iyy="0.00001451795012" iyz="0.00000051094752" izz="0.00001637877663"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_thumb_0_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_thumb_0_link.obj"/>
+            </geometry>
+        </collision>
+    </link>
+    <joint name="right_hand_thumb_1_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="-0.0025 0.0193 0"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_thumb_0_link"/>
+        <child link="right_hand_thumb_1_link"/>
+        <limit effort="1.4" lower="-1.04719755" upper="0.72431163" velocity="12"/>
+    </joint>
+    <link name="right_hand_thumb_1_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="-0.00082788768 0.03547435774 -0.00038089960"/>
+            <mass value="0.05885070"/>
+            <inertia ixx="0.00001274699945" ixy="0.00000050770784" ixz="0.00000016088850" iyy="0.00000601573947" iyz="0.00000027839003" izz="0.00001234543582"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_thumb_1_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_thumb_1_link.obj"/>
+            </geometry>
+        </collision>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_thumb_1_link_extra.obj"/>
+            </geometry>
+        </collision>
+    </link>
+    <joint name="right_hand_thumb_2_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0 0.0458 0"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_thumb_1_link"/>
+        <child link="right_hand_thumb_2_link"/>
+        <limit effort="1.4" lower="-1.74532925" upper="0" velocity="12"/>
+    </joint>
+    <link name="right_hand_thumb_2_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="-0.00171735242 0.02628192939 0.00010778879"/>
+            <mass value="0.02030626"/>
+            <inertia ixx="0.00000461267817" ixy="0.00000003422130" ixz="-0.00000000823881" iyy="0.00000153561368" iyz="0.00000002549885" izz="0.00000386625776"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_thumb_2_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_thumb_2_link.obj"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- Middle Finger -->
+    <joint name="right_hand_middle_0_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0.0777 -0.0016 -0.0285"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_palm_link"/>
+        <child link="right_hand_middle_0_link"/>
+        <limit effort="1.4" lower="0" upper="1.57079632" velocity="12"/>
+    </joint>
+    <link name="right_hand_middle_0_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="0.03547435774 -0.00082788768 0.00038089960"/>
+            <mass value="0.05885070"/>
+            <inertia ixx="0.00000601573947" ixy="0.00000050770784" ixz="-0.00000027839003" iyy="0.00001274699945" iyz="-0.00000016088850" izz="0.00001234543582"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_middle_0_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_middle_0_link.obj"/>
+            </geometry>
+        </collision>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_middle_0_link_extra.obj"/>
+            </geometry>
+        </collision>
+    </link>
+    <joint name="right_hand_middle_1_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0.0458 0 0"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_middle_0_link"/>
+        <child link="right_hand_middle_1_link"/>
+        <limit effort="1.4" lower="0" upper="1.74532925" velocity="12"/>
+    </joint>
+    <link name="right_hand_middle_1_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="0.02628192939 -0.00171735242 -0.00010778879"/>
+            <mass value="0.02030626"/>
+            <inertia ixx="0.00000153561368" ixy="0.00000003422130" ixz="-0.00000002549885" iyy="0.00000461267817" iyz="0.00000000823881" izz="0.00000386625776"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_middle_1_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_middle_1_link.obj"/>
+            </geometry>
+        </collision>
+    </link>
+
+    <!-- Index Finger -->
+    <joint name="right_hand_index_0_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0.0777 -0.0016 0.0285"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_palm_link"/>
+        <child link="right_hand_index_0_link"/>
+        <limit effort="1.4" lower="0" upper="1.57079632" velocity="12"/>
+    </joint>
+    <link name="right_hand_index_0_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="0.03547435774 -0.00082788768 0.00038089960"/>
+            <mass value="0.05885070"/>
+            <inertia ixx="0.00000601573947" ixy="0.00000050770784" ixz="-0.00000027839003" iyy="0.00001274699945" iyz="-0.00000016088850" izz="0.00001234543582"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_index_0_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_index_0_link.obj"/>
+            </geometry>
+        </collision>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <!-- the connecting part for the index is the same as the middle finger -->
+                <mesh filename="collision/hands/right_hand_middle_0_link_extra.obj"/>
+            </geometry>
+        </collision>
+    </link>
+    <joint name="right_hand_index_1_joint" type="revolute">
+        <origin rpy="0 0 0" xyz="0.0458 0 0"/>
+        <axis xyz="0 0 1"/>
+        <parent link="right_hand_index_0_link"/>
+        <child link="right_hand_index_1_link"/>
+        <limit effort="1.4" lower="0" upper="1.74532925" velocity="12"/>
+    </joint>
+    <link name="right_hand_index_1_link">
+        <inertial>
+            <origin rpy="0 0 0" xyz="0.02628192939 -0.00171735242 -0.00010778879"/>
+            <mass value="0.02030626"/>
+            <inertia ixx="0.00000153561368" ixy="0.00000003422130" ixz="-0.00000002549885" iyy="0.00000461267817" iyz="0.00000000823881" izz="0.00000386625776"/>
+        </inertial>
+        <visual>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="visual/hands/right_hand_index_1_link.obj"/>
+            </geometry>
+            <material name="white">
+                <color rgba="0.7 0.7 0.7 1"/>
+            </material>
+        </visual>
+        <collision>
+            <origin rpy="0 0 0" xyz="0 0 0"/>
+            <geometry>
+                <mesh filename="collision/hands/right_hand_index_1_link.obj"/>
+            </geometry>
+        </collision>
+    </link>
+
+</robot>

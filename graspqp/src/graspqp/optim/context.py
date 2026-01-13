@@ -117,12 +117,23 @@ class OptimizationContext:
         """Set current contact indices (called by optimizer during step)."""
         self._current_contact_indices = indices
 
-    def create_contact_sampler_from_reference(self):
+    def create_contact_sampler_from_reference(
+        self,
+        min_fingers: int = None,
+        max_contacts_per_link: int = 2,
+        mode: str = "constrained",
+    ):
         """
         Create a contact sampler based on reference finger constraints.
 
         This creates a HierarchicalContactSampler that only samples
         contact points from the fingers specified in the reference.
+
+        Args:
+            min_fingers: Minimum number of different fingers required in each sample.
+                         Default is None which means use all available fingers.
+            max_contacts_per_link: Maximum contacts per link (default: 2)
+            mode: Sampling mode - "constrained" (strict, default) or "guided" (allows exploration)
         """
         if self._contact_fingers is None:
             # No finger constraints - use uniform sampling
@@ -131,11 +142,17 @@ class OptimizationContext:
         try:
             from graspqp.core import ContactSamplingConfig, HierarchicalContactSampler
 
+            # If min_fingers not specified, let the sampler figure it out
+            # based on available fingers in preferred_links
+            if min_fingers is None:
+                min_fingers = 2  # Default minimum
+
             config = ContactSamplingConfig(
-                mode="guided",
+                mode=mode,  # Use "constrained" for strict finger constraints
                 preferred_links=self._contact_fingers,
-                preference_weight=1.0,  # Only sample from these fingers
-                min_fingers=len(self._contact_fingers),
+                preference_weight=1.0,
+                min_fingers=min_fingers,
+                max_contacts_per_link=max_contacts_per_link,
             )
             self._contact_sampler = HierarchicalContactSampler(self.hand_model, config)
             return self._contact_sampler

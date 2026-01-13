@@ -36,6 +36,13 @@ class AdamOptimizer(Optimizer):
                      More efficient when reference trajectory is converted to object frame.
             - True: Optimize both hand_states and object_states.
 
+    Learning rate scheduling:
+        lr_schedule: Schedule type - "none", "exponential", "cosine", "step" (default: "none")
+        lr_decay: Decay rate for exponential/step schedule (default: 0.99)
+        lr_min: Minimum learning rate (default: 1e-5)
+        lr_decay_steps: For step schedule, decay every N steps (default: 100)
+        lr_total_steps: For cosine schedule, total number of steps (default: 1000)
+
     Adaptive contact resampling:
         resample_contacts: Enable contact resampling for stuck batches (default: False)
         resample_interval: Check for stuck batches every N steps (default: 50)
@@ -51,6 +58,13 @@ class AdamOptimizer(Optimizer):
         debug: bool = False,
         min_grad_norm: float = 0.0,
         optimize_object: bool = False,
+        # Learning rate scheduling
+        lr_schedule: str = "none",
+        lr_decay: float = 0.99,
+        lr_min: float = 1e-5,
+        lr_decay_steps: int = 100,
+        lr_total_steps: int = 1000,
+        # Adaptive contact resampling
         resample_contacts: bool = False,
         resample_interval: int = 50,
         resample_threshold: float = 3.0,
@@ -58,12 +72,20 @@ class AdamOptimizer(Optimizer):
     ):
         super().__init__(config)
         self.lr = lr
+        self.lr_initial = lr
         self.betas = betas
         self.eps = eps
         self.weight_decay = weight_decay
         self.debug = debug
         self.min_grad_norm = min_grad_norm
         self.optimize_object = optimize_object
+
+        # Learning rate scheduling
+        self.lr_schedule = lr_schedule
+        self.lr_decay = lr_decay
+        self.lr_min = lr_min
+        self.lr_decay_steps = lr_decay_steps
+        self.lr_total_steps = lr_total_steps
 
         # Adaptive contact resampling
         self.resample_contacts = resample_contacts
@@ -74,6 +96,7 @@ class AdamOptimizer(Optimizer):
         self._hand_param: Optional[Tensor] = None
         self._object_param: Optional[Tensor] = None
         self._internal_optimizer: Optional[Adam] = None
+        self._step_count: int = 0
 
         # Energy tracking for adaptive resampling
         self._current_energy: Optional[Tensor] = None
@@ -116,11 +139,46 @@ class AdamOptimizer(Optimizer):
                 f"object_param shape={self._object_param.shape}"
             )
 
+        # Reset step count
+        self._step_count = 0
+
         # Return state pointing to persistent params
         new_state = state.clone()
         new_state.hand_states = self._hand_param
         new_state.object_states = self._object_param
         return new_state
+
+    def _get_learning_rate(self, step: int) -> float:
+        """
+        Compute the learning rate for the current step based on the schedule.
+
+        Returns:
+            Learning rate for this step (clipped to lr_min).
+        """
+        import math
+
+        if self.lr_schedule == "none":
+            return self.lr_initial
+
+        elif self.lr_schedule == "exponential":
+            # LR decays by lr_decay every step: lr = lr_initial * (lr_decay ** step)
+            lr = self.lr_initial * (self.lr_decay ** step)
+
+        elif self.lr_schedule == "step":
+            # LR decays by lr_decay every lr_decay_steps
+            n_decays = step // self.lr_decay_steps
+            lr = self.lr_initial * (self.lr_decay ** n_decays)
+
+        elif self.lr_schedule == "cosine":
+            # Cosine annealing: smoothly decreases from lr_initial to lr_min
+            progress = min(step / self.lr_total_steps, 1.0)
+            lr = self.lr_min + 0.5 * (self.lr_initial - self.lr_min) * (1 + math.cos(math.pi * progress))
+
+        else:
+            # Unknown schedule, use constant
+            lr = self.lr_initial
+
+        return max(lr, self.lr_min)
 
     def step(
         self,
@@ -186,6 +244,7 @@ class AdamOptimizer(Optimizer):
 
         if self.debug and self._step_count % 10 == 0:
             hand_grad = self._hand_param.grad
+            current_lr = self._get_learning_rate(self._step_count)
             if hand_grad is not None:
                 grad_norm = hand_grad.norm().item()
                 grad_mean = hand_grad.abs().mean().item()
@@ -193,6 +252,7 @@ class AdamOptimizer(Optimizer):
                 print(
                     f"[AdamOptimizer] Step {self._step_count}: "
                     f"energy={total.item():.4f}, "
+                    f"lr={current_lr:.6f}, "
                     f"grad_norm={grad_norm:.6f}, "
                     f"grad_mean={grad_mean:.6f}, "
                     f"grad_max={grad_max:.6f}"
@@ -234,9 +294,13 @@ class AdamOptimizer(Optimizer):
         if self.optimize_object:
             params.append(self._object_param)
 
+        # Apply learning rate schedule
+        current_lr = self._get_learning_rate(self._step_count)
+        self.lr = current_lr  # Update current lr for reference
+
         self._internal_optimizer = Adam(
             params,
-            lr=self.lr,
+            lr=current_lr,
             betas=self.betas,
             eps=self.eps,
             weight_decay=self.weight_decay,

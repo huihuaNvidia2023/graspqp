@@ -19,10 +19,18 @@ import sys
 from pathlib import Path
 
 # Add parent directories to path for direct execution
+# IMPORTANT: Handle ROS scripts package collision by ensuring repo root comes first
 _THIS_DIR = Path(__file__).parent
 _REPO_ROOT = _THIS_DIR.parent.parent.parent
-if str(_REPO_ROOT) not in sys.path:
-    sys.path.insert(0, str(_REPO_ROOT))
+
+# Remove repo root if it exists, then re-add at position 0 to ensure priority
+_repo_str = str(_REPO_ROOT)
+sys.path = [p for p in sys.path if p != _repo_str]
+sys.path.insert(0, _repo_str)
+
+# Also need to clear any cached 'scripts' module that ROS may have loaded
+if 'scripts' in sys.modules:
+    del sys.modules['scripts']
 
 
 def main():

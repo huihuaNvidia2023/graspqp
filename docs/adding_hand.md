@@ -210,6 +210,65 @@ To fix this, remesh the collision meshes in Blender using the smooth modifier (c
 
 <img src="image-3.png" alt="Correctly Aligned Hand and Collision Meshes" width="640" />
 
+#### Common Collision Mesh Issues and Fixes
+
+When the occupancy grid shows artifacts (tails, floating points, stair-stepping), the collision meshes likely have geometry problems. Here's a checklist:
+
+**1. Check mesh is manifold (watertight)**
+```python
+# In Blender Python console, after importing mesh:
+import bmesh
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+non_manifold = [e for e in bm.edges if not e.is_manifold]
+boundary = [e for e in bm.edges if e.is_boundary]
+print(f"Non-manifold edges: {len(non_manifold)}, Boundary edges: {len(boundary)}")
+# Both should be 0 for clean SDF calculation
+```
+
+**2. Remeshing options in Blender**
+- **SMOOTH mode**: Preserves shape better, good for organic geometry. Use `octree_depth=5-6`.
+- **VOXEL mode**: Guarantees manifold output, may create flat surfaces. Use `voxel_size=0.002` (2mm).
+
+**3. When mirroring left→right hand meshes**
+
+⚠️ **Important**: Not all meshes should be X-mirrored!
+- **Main link meshes** (palm, fingers): Generate from visual meshes, apply remesh
+- **Extra collision primitives** (`*_extra_*.obj`): These are positioned relative to their parent link. Copy from left hand **without** mirroring - just apply smoothing.
+
+```python
+# WRONG: Mirroring extra meshes moves them to wrong position
+obj.scale.x = -1  # Don't do this for extra meshes!
+
+# CORRECT: Just copy and smooth
+bpy.ops.import_scene.obj(filepath=left_path)
+mod = obj.modifiers.new("Remesh", 'REMESH')
+mod.mode = 'SMOOTH'
+bpy.ops.object.modifier_apply(modifier="Remesh")
+bpy.ops.export_scene.obj(filepath=right_path)
+```
+
+**4. Quick diagnosis from occupancy grid**
+
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| Long "tail" extending from hand | Non-manifold edges or thin faces | Use VOXEL remesh |
+| Floating clusters separate from hand | Extra meshes at wrong position | Don't mirror extra meshes |
+| Stair-stepping/blocky appearance | VOXEL size too large | Reduce voxel_size or use SMOOTH mode |
+| Single floating point | One mesh has wrong center position | Check all mesh centers match left hand |
+
+**5. Verify mesh positions after processing**
+```python
+# Mesh centers should match between left and right for extra meshes
+# Example: palm_link_extra should be at X ≈ +0.078 for BOTH hands
+import bmesh
+bm = bmesh.new()
+bm.from_mesh(obj.data)
+verts = [v.co for v in bm.verts]
+center_x = (min(v.x for v in verts) + max(v.x for v in verts)) / 2
+print(f"Center X: {center_x}")  # Should be positive for palm extras
+```
+
 ### 7. Provide contact and penetration configs
 
 For each link that should be used for contact sampling, extract meshes to sample contact points and place them in the `meshes/contacts/` folder.
@@ -383,4 +442,205 @@ python scripts/fit.py --data_root_path /<path_to_dataset>/full --hand_name schun
 
 ## Troubleshooting
 
-- Collisions not working as expected? Ensure `<collision>` meshes reference `collisions/...` and that files exist. Verify validity with the occupancy grid visualization. If needed, remesh in Blender.
+### General Issues
+
+- **Collisions not working as expected?** Ensure `<collision>` meshes reference `collisions/...` and that files exist. Verify validity with the occupancy grid visualization. If needed, remesh in Blender.
+
+---
+
+### Common Issues When Adding a New Hand (Case Study: G1 Dex Hand)
+
+This section documents common issues encountered when adding the Unitree G1 dex hand to graspqp, along with their solutions. These lessons apply broadly to adding other hands.
+
+#### Issue 1: Fingers Not Wrapping Object / Hyperextending
+
+**Symptoms:**
+- During optimization, fingers extend away from the object instead of curling around it
+- Energy decreases but grasp quality is poor
+- Contact points move away from the object surface
+
+**Root Cause:** Contact mesh normals pointing in the wrong direction (inward instead of outward).
+
+**Diagnosis:**
+```python
+import trimesh
+# Load contact mesh and check average face normal
+mesh = trimesh.load("graspqp/assets/<hand>/meshes/contact/<finger>.obj")
+print(f"Average face normal: {mesh.face_normals.mean(axis=0)}")
+# Normals should point OUTWARD from the finger surface (toward where object would be)
+```
+
+**Solution:** Fix face winding order in contact mesh OBJ files. In OBJ format, face winding determines normal direction:
+```
+# Original (normals pointing inward - WRONG)
+f 1//1 3//1 4//1 2//1
+
+# Fixed (normals pointing outward - CORRECT)
+f 1//1 2//1 4//1 3//1
+```
+
+**Why it matters:** The `ContactDistanceCost` uses the dot product of object surface normal and hand contact normal to penalize misalignment. If hand normals point inward, the optimizer pushes contacts away from the object.
+
+---
+
+#### Issue 2: Poor Initial Hand Configuration
+
+**Symptoms:**
+- Hand starts too far from object
+- Fingers start fully extended or over-flexed
+- Object not positioned in the grasp zone (between palm and fingertips)
+
+**Key Parameters to Tune:**
+
+1. **`default_state`** - Initial joint angles
+   ```python
+   default_state=torch.tensor([
+       0.0,    # joint_0 - neutral
+       0.3,    # joint_1 - partially flexed
+       0.5,    # joint_2 - partially flexed
+       # ... etc
+   ], dtype=torch.float, device=device),
+   ```
+   - Don't use all zeros (fully extended) for dexterous hands
+   - Set joints to ~20-30% of their range for a natural "ready to grasp" pose
+   - Check joint limits in URDF to determine reasonable values
+
+2. **`forward_axis`** - Direction the palm faces (toward object)
+   ```python
+   forward_axis="z",  # Palm faces +Z direction
+   ```
+   - This determines how the hand is oriented when approaching the object
+   - Should point from palm toward where the object will be placed
+
+3. **`up_axis`** - Perpendicular to palm, often finger extension direction
+   ```python
+   up_axis="x",  # Fingers extend in +X direction
+   ```
+   - Must be perpendicular to `forward_axis`
+   - Affects the hand's roll orientation around the approach axis
+
+4. **`init_offset`** - Shift hand so grasp zone aligns with object
+   ```python
+   # Format: [forward, up, left] in hand's local frame
+   init_offset=torch.tensor([0.08, 0.0, -0.10], dtype=torch.float, device=device),
+   ```
+   - Positive forward: moves hand closer to object
+   - Adjust based on where the grasp zone (between palm and fingertips) is relative to hand origin
+
+**Debugging Script:**
+Create a test script to quickly iterate on initial configuration:
+```python
+# scripts/test_<hand>_init.py
+import torch
+from graspqp.hands import get_hand_model
+from graspqp.core import ObjectModel
+from graspqp.core.initializations import initialize_convex_hull
+# ... visualization code to see hand + object placement
+```
+
+---
+
+#### Issue 3: Grasp Viewer Shows Different Pose Than Optimizer
+
+**Symptoms:**
+- `test_init.py` shows fingers curling correctly
+- `grasp_viewer` shows fingers bending in wrong direction
+- Joint values appear scrambled between tools
+
+**Root Cause:** Joint ordering mismatch between HandModel and visualization tools.
+
+**Diagnosis:**
+```python
+# Check if joint orders match
+from graspqp.hands import get_hand_model
+hand_model = get_hand_model('<hand_name>', 'cuda')
+print("HandModel order:", hand_model._actuated_joints_names)
+
+# vs alphabetically sorted (what some tools incorrectly use)
+print("Alphabetical:", sorted(hand_model._actuated_joints_names))
+```
+
+**Example Mismatch (G1 hand):**
+```
+HandModel:    thumb_0, thumb_1, thumb_2, middle_0, middle_1, index_0, index_1
+Alphabetical: index_0, index_1, middle_0, middle_1, thumb_0, thumb_1, thumb_2
+```
+
+**Solution:** Ensure all tools use URDF joint order, not alphabetical sorting. The fix was applied to `scripts/vis/grasp_viewer/data/optimized_adapter.py`.
+
+---
+
+#### Issue 4: Understanding Axis Configuration
+
+**How `forward_axis` and `up_axis` work in initialization:**
+
+1. A random point `p` on the object surface is sampled with outward normal `n`
+2. Hand is placed at `p - distance * n` (behind the surface, along the normal)
+3. Hand is rotated so `forward_axis` points toward the object
+4. `up_axis` controls the roll around the approach direction
+5. `init_offset` shifts the hand in its local frame
+
+**Determining correct axes for your hand:**
+
+```python
+# At identity pose, check where palm and fingers are:
+hand_model = get_hand_model('<hand_name>', 'cuda')
+hand_model.set_parameters(identity_pose, contact_point_indices='all')
+
+# Get palm contact normal (this should point toward object)
+palm_normals = hand_model.mesh['<palm_link>']['normal_candidates']
+print(f"Palm normal direction: {palm_normals.mean(dim=0)}")
+# This direction should match forward_axis
+
+# Check fingertip positions at extended vs flexed
+# The grasp zone is between these positions
+```
+
+**Reference (Allegro hand, which works well):**
+```python
+forward_axis="z",  # Palm faces +Z
+up_axis="x",       # Fingers extend roughly +Y, perpendicular is X
+grasp_axis="y",    # Lateral direction
+```
+
+---
+
+#### Issue 5: Adding Hand to Grasp Viewer
+
+Don't forget to register your hand in `scripts/vis/grasp_viewer/data/optimized_adapter.py`:
+
+```python
+HAND_CONFIGS = {
+    # ... existing hands ...
+    "your_hand": {
+        "urdf_file": "your_hand/your_hand.urdf",
+        "mesh_dir": "your_hand/meshes",
+    },
+}
+```
+
+---
+
+### Quick Validation Checklist
+
+Before running full optimization, verify:
+
+- [ ] **Contact normals point outward** - Use trimesh to check face normals
+- [ ] **Default state is reasonable** - Not all zeros, joints partially flexed
+- [ ] **Forward axis matches palm direction** - Palm should face the object
+- [ ] **Init offset positions grasp zone** - Object should be between palm and fingertips
+- [ ] **Joint order matches** - Check HandModel order vs URDF parsing order
+- [ ] **Hand registered in grasp_viewer** - Add to HAND_CONFIGS if using viewer
+
+### Useful Debug Commands
+
+```bash
+# Visualize hand with contact points and normals
+python scripts/vis/visualize_hand_model.py --hand_name <hand> --show_contact_normals
+
+# Test initial configuration quickly
+python scripts/test_<hand>_init.py
+
+# Run 1-step optimization to check initial pose
+python scripts/sanity_check_adam.py --hand_name <hand> --n_iter 1 --object_code_list apple
+```

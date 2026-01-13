@@ -145,10 +145,21 @@ def initialize_convex_hull(hand_model, object_model, args, env_mask=None, energy
                 device=device,
             )
 
-        translation[i * batch_size_each : (i + 1) * batch_size_each] = (
-            p - distance.unsqueeze(1) * n
-        )  # * (rotation_global @ rotation_local @ torch.tensor([0, 0, 1], dtype=torch.float, device=device).reshape(1, -1, 1)).squeeze(2)
-        rotation[i * batch_size_each : (i + 1) * batch_size_each] = rotation_global @ rotation_local  # @ rotation_hand
+        # Compute final rotation
+        final_rotation = rotation_global @ rotation_local
+        
+        # Compute base translation
+        base_translation = p - distance.unsqueeze(1) * n
+        
+        # Apply hand-specific init_offset if available (in hand's local frame)
+        if hasattr(hand_model, 'init_offset') and hand_model.init_offset is not None:
+            # Transform offset from hand local frame to world frame
+            # init_offset is [forward, up, left] in hand's basis
+            offset_world = (final_rotation @ hand_model.init_offset.unsqueeze(0).unsqueeze(-1)).squeeze(-1)
+            base_translation = base_translation + offset_world
+        
+        translation[i * batch_size_each : (i + 1) * batch_size_each] = base_translation
+        rotation[i * batch_size_each : (i + 1) * batch_size_each] = final_rotation
 
         # For handles
 

@@ -33,13 +33,25 @@ hands:
       thumb_joint_3: 0.0384
 
 # Contact sampling configuration
+# Only allow contacts on index, middle, and thumb fingers (1-2 fingers in contact)
 contact:
-  mode: uniform
+  mode: constrained
+  links:
+    - index_link_1
+    - index_link_2
+    - index_link_3
+    - middle_link_1
+    - middle_link_2
+    - middle_link_3
+    - thumb_link_2
+    - thumb_link_3
+  min_fingers: 3
+  max_contacts_per_link: 4
 
 # Jitter for batch diversity (applied to repeated priors)
-jitter_translation: 0.02
-jitter_rotation: 0.1
-jitter_joints: 0.1
+jitter_translation: 0.05
+jitter_rotation: 0.2
+jitter_joints: 0.2
 
-# Weight for prior deviation energy
-prior_weight: 10.0
+# # Weight for prior deviation energy
+# prior_weight: 10.0

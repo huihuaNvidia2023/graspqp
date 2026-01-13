@@ -47,18 +47,30 @@ def parse_args():
     parser.add_argument("--n_iter", default=200, type=int, help="Number of optimization iterations")
 
     # Weights
-    parser.add_argument("--w_dis", default=10.0, type=float, help="Weight for contact distance cost")
+    parser.add_argument("--w_dis", default=1000.0, type=float, help="Weight for contact distance cost")
     parser.add_argument("--w_fc", default=1.0, type=float, help="Weight for force closure cost (0 to disable)")
-    parser.add_argument("--w_pen", default=10.0, type=float, help="Weight for hand-object penetration cost")
-    parser.add_argument("--w_spen", default=10.0, type=float, help="Weight for self-penetration cost")
+    parser.add_argument("--w_pen", default=1.0, type=float, help="Weight for hand-object penetration cost")
+    parser.add_argument("--w_spen", default=100.0, type=float, help="Weight for self-penetration cost")
     parser.add_argument("--w_joints", default=1.0, type=float, help="Weight for joint limit violation cost")
-    parser.add_argument("--w_prior", default=10.0, type=float, help="Weight for prior pose deviation cost")
+    parser.add_argument("--w_prior", default=0.1, type=float, help="Weight for prior pose deviation cost")
     parser.add_argument("--w_svd", default=0.1, type=float, help="SVD regularization gain for force closure QP")
 
     # Adam settings
-    parser.add_argument("--lr", default=0.01, type=float, help="Learning rate for Adam optimizer")
+    parser.add_argument("--lr", default=0.001, type=float, help="Learning rate for Adam optimizer")
     parser.add_argument("--beta1", default=0.9, type=float, help="Adam beta1 (exponential decay for 1st moment)")
     parser.add_argument("--beta2", default=0.999, type=float, help="Adam beta2 (exponential decay for 2nd moment)")
+
+    # Learning rate scheduling
+    parser.add_argument(
+        "--lr_schedule",
+        default="none",
+        choices=["none", "exponential", "step", "cosine"],
+        help="Learning rate schedule: 'none' (constant), 'exponential' (decay each step), "
+        "'step' (decay every lr_decay_steps), 'cosine' (cosine annealing)",
+    )
+    parser.add_argument("--lr_decay", default=0.99, type=float, help="LR decay rate for exponential/step schedule (e.g., 0.99)")
+    parser.add_argument("--lr_min", default=1e-5, type=float, help="Minimum learning rate (LR won't go below this)")
+    parser.add_argument("--lr_decay_steps", default=100, type=int, help="For step schedule, decay LR every N steps")
 
     # Adaptive contact resampling
     parser.add_argument("--resample_contacts", action="store_true", help="Enable contact resampling for stuck batches")
@@ -250,9 +262,50 @@ def main():
     # Set up contact sampler based on prior config
     # Only create constrained sampler if contact_fingers are specified
     if contact_fingers:
-        sampler = context.create_contact_sampler_from_reference()
+        # Get contact config from prior
+        min_fingers = prior_config.contact.min_fingers if prior_config and prior_config.contact else 2
+        max_contacts_per_link = prior_config.contact.max_contacts_per_link if prior_config and prior_config.contact else 2
+        contact_mode = prior_config.contact.mode if prior_config and prior_config.contact else "constrained"
+        
+        sampler = context.create_contact_sampler_from_reference(
+            min_fingers=min_fingers,
+            max_contacts_per_link=max_contacts_per_link,
+            mode=contact_mode,
+        )
         if context.contact_sampler is not None:
-            print(f"  Contact sampler: constrained to specified fingers")
+            print(f"  Contact sampler: mode={contact_mode}, constrained to specified fingers")
+            print(f"    min_fingers: {min_fingers}, max_contacts_per_link: {max_contacts_per_link}")
+            
+            # IMPORTANT: Resample initial contacts using the constrained sampler
+            # The initial contacts were set in initialize_convex_hull with uniform sampling
+            # Now we need to resample them to respect finger constraints
+            initial_contacts = context.contact_sampler.sample(total_batch_size, args.n_contact)
+            hand_model.contact_point_indices = initial_contacts
+            context.set_contact_indices(initial_contacts)
+            print(f"  Initial contacts resampled to respect finger constraints")
+            
+            # Verify the resampled contacts - get link names for each contact index
+            print(f"  Contact indices shape: {initial_contacts.shape} (expected: [{total_batch_size}, {args.n_contact}])")
+            link_names = list(hand_model.mesh.keys())  # Ordered link names
+            link_indices = hand_model.global_index_to_link_index[initial_contacts[0]]  # First batch
+            contact_link_names = [link_names[idx] for idx in link_indices.tolist()]
+            
+            # Count contacts per link
+            from collections import Counter
+            link_counts = Counter(contact_link_names)
+            print(f"  Contacts per link (batch 0): {dict(link_counts)}")
+            print(f"  Total contacts: {sum(link_counts.values())}")
+            
+            # Count how many fingers are represented
+            unique_links = sorted(set(contact_link_names))
+            finger_names = set()
+            for link in unique_links:
+                for prefix in ["index", "middle", "ring", "thumb", "pinky"]:
+                    if link.startswith(prefix):
+                        finger_names.add(prefix)
+                        break
+            print(f"  Unique links: {unique_links}")
+            print(f"  Fingers in contact: {sorted(finger_names)} ({len(finger_names)} fingers)")
         else:
             print(f"  Contact sampler: failed to create, falling back to uniform")
     else:
@@ -307,12 +360,20 @@ def main():
         betas=(args.beta1, args.beta2),
         debug=args.debug,
         optimize_object=args.optimize_object,
+        # Learning rate scheduling
+        lr_schedule=args.lr_schedule,
+        lr_decay=args.lr_decay,
+        lr_min=args.lr_min,
+        lr_decay_steps=args.lr_decay_steps,
+        lr_total_steps=args.n_iter,  # Use n_iter for cosine schedule
+        # Adaptive contact resampling
         resample_contacts=args.resample_contacts,
         resample_interval=args.resample_interval,
         resample_threshold=args.resample_threshold,
     )
     opt_vars = "hand + object" if args.optimize_object else "hand only (object fixed at origin)"
-    print(f"\nOptimizer: AdamOptimizer (lr={args.lr}, optimizing: {opt_vars})")
+    lr_schedule_info = f", schedule={args.lr_schedule}" if args.lr_schedule != "none" else ""
+    print(f"\nOptimizer: AdamOptimizer (lr={args.lr}{lr_schedule_info}, optimizing: {opt_vars})")
     if args.resample_contacts:
         print(
             f"  Contact resampling: enabled (interval={args.resample_interval}, threshold={args.resample_threshold}x)"
@@ -368,8 +429,10 @@ def main():
 
             # Periodic detailed logging
             if step % 50 == 0 or step <= 5:
+                current_lr = optimizer.lr if hasattr(optimizer, "lr") else args.lr
                 print(f"\nStep {step}:")
                 print(f"  Energy: mean={energy.mean().item():.4f}, best={energy.min().item():.4f}")
+                print(f"  Learning rate: {current_lr:.6f}")
                 print(f"  Hand state change: {hand_change:.6f}")
 
                 # Note: After optimizer.step(), the internal params are new tensors

@@ -34,6 +34,10 @@ class ContactDistanceCost(PerFrameCost):
 
     Config options:
         method: "gendexgrasp" (default) or "dexgraspnet"
+        asymmetric: If True, penalize being outside object more than inside (default: True)
+                   This creates stronger gradient to pull contacts toward surface.
+        outside_weight: Weight for positive distance (outside object) when asymmetric=True (default: 1.0)
+        inside_weight: Weight for negative distance (inside object) when asymmetric=True (default: 0.1)
     """
 
     def __init__(
@@ -47,6 +51,31 @@ class ContactDistanceCost(PerFrameCost):
         super().__init__(name, weight, enabled, config, aggregation)
         config = config or {}
         self.method = config.get("method", "gendexgrasp")
+        self.asymmetric = config.get("asymmetric", True)
+        self.outside_weight = config.get("outside_weight", 1.0)
+        self.inside_weight = config.get("inside_weight", 0.1)
+
+    def _compute_distance_term(self, distance: Tensor) -> Tensor:
+        """
+        Compute the distance term for the cost.
+
+        Args:
+            distance: Signed distance values (positive = outside, negative = inside)
+
+        Returns:
+            Distance term with appropriate weighting
+        """
+        if self.asymmetric:
+            # Asymmetric: penalize outside more than inside
+            # This creates stronger gradient to pull contacts toward surface
+            # outside (d > 0): weight * d
+            # inside (d < 0): weight * |d|
+            outside = F.relu(distance) * self.outside_weight
+            inside = F.relu(-distance) * self.inside_weight
+            return outside + inside
+        else:
+            # Original symmetric behavior
+            return distance.abs()
 
     def evaluate_frames(
         self,
@@ -67,9 +96,12 @@ class ContactDistanceCost(PerFrameCost):
         # Get SDF distance and normals at contact points (CACHED - expensive operation!)
         distance, contact_normal = ctx.get_contact_sdf_cached(flat_hand)  # (B*T, n_contacts)
 
+        # Compute distance term (asymmetric or symmetric)
+        dist_term = self._compute_distance_term(distance)
+
         if self.method == "dexgraspnet":
-            # Simple method: sum of absolute distances
-            cost = distance.abs().sum(dim=-1)  # (B*T,)
+            # Simple method: sum of distances
+            cost = dist_term.sum(dim=-1)  # (B*T,)
         else:
             # gendexgrasp method (default, matches fit.py)
             # vC = object normal (pointing outward from object)
@@ -81,10 +113,10 @@ class ContactDistanceCost(PerFrameCost):
             # When contact is good, -vC (into object) aligns with nH (out of hand)
             dot_product = torch.sum((-vC) * nH, dim=-1)  # (B*T, n_contacts)
 
-            # Cost: exp(1 - dot_product) * |distance|
-            # - When aligned (dot=1): exp(0) * |d| = |d|
-            # - When misaligned (dot=-1): exp(2) * |d| ≈ 7.4 * |d|
-            cost = ((1 - dot_product).exp() * distance.abs()).sum(dim=-1)  # (B*T,)
+            # Cost: exp(1 - dot_product) * distance_term
+            # - When aligned (dot=1): exp(0) * d = d
+            # - When misaligned (dot=-1): exp(2) * d ≈ 7.4 * d
+            cost = ((1 - dot_product).exp() * dist_term).sum(dim=-1)  # (B*T,)
 
         # Reshape to (B, T)
         return cost.reshape(B, T)

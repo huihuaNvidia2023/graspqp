@@ -5,6 +5,7 @@ ASSET_DIR = os.path.join(os.path.dirname(__file__), "../../../assets")
 
 from .ability_hand import getHandModel as getAbilityHandModel
 from .allegro import getHandModel as getAllegroHandModel
+from .g1_dex_hand import getHandModel as getG1DexHandModel
 from .panda import getHandModel as getPandaHandModel
 from .robotiq2 import getHandModel as getRobotiq2HandModel
 from .robotiq3 import getHandModel as getRobotiq3HandModel
@@ -19,6 +20,7 @@ _REGISTRY = {
     "shadow_hand": getShadowHandModel,
     "robotiq2": getRobotiq2HandModel,
     "schunk2": getSchunkHandModel,
+    "g1_dex_hand": getG1DexHandModel,
 }
 
 AVAILABLE_HANDS = list(_REGISTRY.keys())
